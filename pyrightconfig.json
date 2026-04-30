@@ -1,0 +1,6 @@
+{
+  "include": ["."],
+  "exclude": [".venv", "data", "runs"],
+  "venvPath": ".venv",
+  "reportMissingImports": false
+}
