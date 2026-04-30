@@ -52,6 +52,7 @@ def freeze_sparse_weights(
             mask_binary = mask.clone()
             mask_binary[mask == 1] = 0
             mask_binary[mask == 0] = 1
+            mask_binary = mask_binary.to(param.device)
 
             param.requires_grad = True
             param.register_hook(lambda grad, mb=mask_binary: grad.mul_(mb))
@@ -145,13 +146,13 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     print(f"Creating mixed weights...")
     create_mixed_weights(model, masks)
 
+    # Move model to device FIRST
+    model = model.to(device)
+
     # Evaluate BEFORE training (4A)
     val_loader = create_dataloaders(data_dir, 128)[1]
     val_loss_before, val_acc_before = evaluate(model, val_loader, device)
     print(f"4A - Before retrain: val_acc = {val_acc_before:.2f}%")
-
-    # Move model to device FIRST, then freeze weights
-    model = model.to(device)
 
     # Freeze sparse weights, biases, BN
     print(f"Freezing sparse weights, biases, and BN...")
