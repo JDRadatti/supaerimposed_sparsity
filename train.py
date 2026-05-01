@@ -102,7 +102,7 @@ def evaluate(model: nn.Module, loader, device: torch.device) -> Tuple[float, flo
     return running_loss / max(total, 1), 100.0 * correct / max(total, 1)
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(model, loader, optimizer, criterion, device, post_step_callback=None):
     """
     Train model for one epoch.
 
@@ -112,6 +112,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         optimizer: Optimizer
         criterion: Loss function
         device: Device to train on
+        post_step_callback: Optional callback to run after each optimizer.step()
 
     Returns:
         Tuple of (average_train_loss, train_accuracy_percent)
@@ -130,6 +131,9 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 
         loss.backward()
         optimizer.step()
+
+        if post_step_callback is not None:
+            post_step_callback()
 
         running_loss += loss.item() * images.size(0)
         correct += (outputs.argmax(1) == targets).sum().item()

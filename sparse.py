@@ -274,14 +274,15 @@ def create_mixed_weights(model: nn.Module, masks: dict):
             continue
 
         w = module.weight.data
-        mask = masks[name]
-        w_orig = weight_data[weight_idx[name]]
+        # Move mask and original weights to the same device as the module's weight
+        mask = masks[name].to(w.device)
+        w_orig = weight_data[weight_idx[name]].to(w.device)
 
         mask_flat = mask.view(-1)
         w_orig_flat = w_orig.view(-1)
 
         w_new = w.clone().view(-1)
-        w_new[mask_flat == 1] = w_orig_flat[mask_flat == 1]
+        w_new[mask_flat == 0] = w_orig_flat[mask_flat == 0]
         module.weight.data = w_new.view(*w.shape)
 
     print(f"[Sparse] Created mixed weights for {len(masks)} layers")

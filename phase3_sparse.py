@@ -52,6 +52,7 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
                 num_classes=10, batch_norm=True, classifier_hidden=512, dropout_p=0.5
             )
             model.load_state_dict(ckpt["model"])
+            model = model.to(device)
             val_loss, val_acc = evaluate(
                 model, create_dataloaders(data_dir, 128)[1], device
             )
@@ -72,11 +73,36 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     N, M = masks_data["N"], masks_data["M"]
     print(f"Loaded {N}:{M} masks for {len(masks)} layers")
 
-    # Apply masks to model weights
-    print(f"Applying masks to model weights...")
+    # Apply masks and enforce 1:4 sparsity during training
+    print(f"Applying masks and enforcing 1:4 sparsity...")
     apply_nm_sparsity(model, masks)
 
+    # Move model to device
     model = model.to(device)
+
+    # Enforce sparsity: zero gradients at mask=0 positions to prevent updates
+    # Store mask references to re-zero weights after each optimizer step
+    mask_store = {}
+    for name, mask in masks.items():
+        for module_name, module in model.named_modules():
+            if module_name == name and hasattr(module, "weight"):
+                mask = mask.to(module.weight.device)
+                mask_store[name] = (module, mask)
+                # Zero gradients at mask=0 positions (prevents weight updates)
+                # Use a default argument to capture the mask value correctly
+                def _make_hook(m):
+                    return lambda grad: grad * m
+                module.weight.register_hook(_make_hook(mask))
+                break
+    
+    # Callback to re-zero mask=0 weights after each optimizer step
+    # This guards against weight decay and momentum restoring zeroed weights
+    def _post_step_callback():
+        for module, mask in mask_store.values():
+            with torch.no_grad():
+                module.weight.mul_(mask)
+    
+    print(f"Enforced 1:4 sparsity for {len(masks)} layers")
 
     train_loader, val_loader = create_dataloaders(data_dir, 128)
 
@@ -94,7 +120,8 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
 
     for epoch in range(epochs):
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device,
+            post_step_callback=_post_step_callback
         )
         scheduler.step()
 
@@ -132,7 +159,14 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
 
     elapsed = time.time() - start_time
     print(f"\nPhase 3 complete in {elapsed:.1f}s")
-    print(f"Final val acc: {val_acc:.2f}%")
+    print(f"Final val acc (dense): {val_acc:.2f}%")
+
+    # Verify sparse accuracy (with mask applied)
+    from copy import deepcopy
+    model_masked = deepcopy(model)
+    apply_nm_sparsity(model_masked, masks)
+    val_loss_sparse, val_acc_sparse = evaluate(model_masked, val_loader, device)
+    print(f"Final val acc (sparse, with mask): {val_acc_sparse:.2f}%")
 
     torch.save(
         {

@@ -33,13 +33,19 @@ from train import (
 )
 
 
-def freeze_sparse_weights(
+def get_trainable_params(
     model: nn.Module, masks: dict, freeze_biases=True, freeze_bn=True
 ):
     """
-    Freeze weights at mask=1 positions, biases, and optionally BatchNorm parameters.
-    After this, only weights at mask=0 positions are trainable.
+    Split parameters into trainable (mask=0 weights) and frozen (mask=1 weights, biases, BN).
+    Returns two lists of parameters for creating optimizer parameter groups.
+    
+    This properly handles weight decay by excluding frozen params from the optimizer
+    or giving them zero weight decay.
     """
+    trainable_params = []  # mask=0 weights (to be retrained)
+    frozen_params = []     # mask=1 weights (sparse, frozen), biases, BN
+
     for name, param in model.named_parameters():
         is_weight = ".weight" in name and ".bias" not in name
         is_bias = ".bias" in name and "bn" not in name.lower()
@@ -49,13 +55,53 @@ def freeze_sparse_weights(
         mask = masks.get(module_name, None)
 
         if mask is not None and is_weight:
-            mask_binary = mask.clone()
-            mask_binary[mask == 1] = 0
-            mask_binary[mask == 0] = 1
-            mask_binary = mask_binary.to(param.device)
-
+            # Split this parameter into trainable (mask=0) and frozen (mask=1) portions
+            # We'll handle this by creating a parameter group with requires_grad=False
+            # for the frozen portion... but PyTorch doesn't support partial parameter freezing
+            # 
+            # Alternative: Use gradient hooks + restore weights after optimizer step
             param.requires_grad = True
-            param.register_hook(lambda grad, mb=mask_binary: grad.mul_(mb))
+            frozen_params.append(param)
+        elif is_bias and freeze_biases:
+            param.requires_grad = False
+            frozen_params.append(param)
+        elif is_bn and freeze_bn:
+            param.requires_grad = False
+            frozen_params.append(param)
+        else:
+            trainable_params.append(param)
+
+    return trainable_params, frozen_params
+
+
+def freeze_sparse_weights(
+    model: nn.Module, masks: dict, optimizer=None, freeze_biases=True, freeze_bn=True
+):
+    """
+    Freeze weights at mask=1 positions (Phase 3 sparse weights).
+    Returns a callback to restore frozen weights after each optimizer step
+    (to protect against weight decay and momentum).
+    If optimizer is provided, also resets momentum buffers for mask=1 positions.
+    """
+    # Store (param, mask, original_values) for mask=1 weights that need protection
+    frozen_store = []
+
+    for name, param in model.named_parameters():
+        is_weight = ".weight" in name and ".bias" not in name
+        is_bias = ".bias" in name and "bn" not in name.lower()
+        is_bn = "bn" in name.lower() or "batchnorm" in name.lower()
+
+        module_name = name.replace(".weight", "").replace(".bias", "")
+        mask = masks.get(module_name, None)
+
+        if mask is not None and is_weight:
+            mask = mask.to(param.device)
+            # Save original mask=1 values (Phase 3 weights, to be preserved)
+            orig_values = param.data.clone()
+            frozen_store.append((param, mask, orig_values))
+            # Zero gradients at mask=1 positions (so only mask=0 get gradients)
+            grad_mask = (mask == 0).float()  # 1 at mask=0, 0 at mask=1
+            param.register_hook(lambda grad, gm=grad_mask: grad * gm)
 
         elif is_bias and freeze_biases:
             param.requires_grad = False
@@ -63,11 +109,33 @@ def freeze_sparse_weights(
         elif is_bn and freeze_bn:
             param.requires_grad = False
 
-    frozen_weight = sum(m.sum().item() for m in masks.values())
-    trainable_weight = sum((1 - m).sum().item() for m in masks.values())
+    frozen_weight = sum((m == 1).sum().item() for m in masks.values())
+    trainable_weight = sum((m == 0).sum().item() for m in masks.values())
     print(
         f"[Freeze] Weights: {int(frozen_weight):,} frozen, {int(trainable_weight):,} trainable"
     )
+
+    # Return a callback that restores mask=1 weights after each optimizer step
+    # This is needed because SGD weight_decay still updates params even when grad=0
+    def post_step_callback():
+        for param, mask, orig_values in frozen_store:
+            with torch.no_grad():
+                # Restore mask=1 positions to original Phase 3 values
+                mask_1 = mask == 1
+                param.data[mask_1] = orig_values[mask_1]
+                # Update stored values for mask=0 positions (they were trained)
+                orig_values[mask == 0] = param.data[mask == 0]
+
+        # Reset momentum buffer for mask=1 positions to prevent accumulation
+        if optimizer is not None:
+            for param, mask, _ in frozen_store:
+                if param in optimizer.state:
+                    state = optimizer.state[param]
+                    if 'momentum_buffer' in state:
+                        # Zero out momentum buffer at mask=1 positions
+                        state['momentum_buffer'][mask == 1] = 0
+
+    return post_step_callback
 
 
 def run(epochs=30, lr=0.01, checkpoint_interval=5):
@@ -102,6 +170,7 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
                 num_classes=10, batch_norm=True, classifier_hidden=512, dropout_p=0.5
             )
             model.load_state_dict(ckpt["model"])
+            model = model.to(device)
 
             # Evaluate without masks (all weights)
             val_loss, val_acc = evaluate(
@@ -149,20 +218,28 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     # Move model to device FIRST
     model = model.to(device)
 
-    # Evaluate BEFORE training (4A)
+    # Evaluate BEFORE training (4A) - sparse accuracy
     val_loader = create_dataloaders(data_dir, 128)[1]
-    val_loss_before, val_acc_before = evaluate(model, val_loader, device)
-    print(f"4A - Before retrain: val_acc = {val_acc_before:.2f}%")
+    from copy import deepcopy
+    from sparse import apply_nm_sparsity
+    model_masked = deepcopy(model)
+    apply_nm_sparsity(model_masked, masks)
+    val_loss_before, val_acc_before = evaluate(model_masked, val_loader, device)
+    print(f"4A - Before retrain (sparse): val_acc = {val_acc_before:.2f}%")
 
     # Freeze sparse weights, biases, BN
     print(f"Freezing sparse weights, biases, and BN...")
-    freeze_sparse_weights(model, masks, freeze_biases=True, freeze_bn=True)
-
+    
     train_loader, val_loader = create_dataloaders(data_dir, 128)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+
+    # Now pass optimizer to freeze_sparse_weights to reset momentum buffers
+    post_step_callback = freeze_sparse_weights(
+        model, masks, optimizer=optimizer, freeze_biases=True, freeze_bn=True
+    )
 
     history = []
 
@@ -174,7 +251,8 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
 
     for epoch in range(epochs):
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device,
+            post_step_callback=post_step_callback
         )
         scheduler.step()
 

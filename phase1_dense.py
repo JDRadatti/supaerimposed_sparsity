@@ -41,6 +41,7 @@ def run(seed, epochs, batch_size, checkpoint_interval):
     print("=" * 60)
 
     model = VGG16(num_classes=10, batch_norm=True, classifier_hidden=512, dropout_p=0.5)
+    model = model.to(device)
 
     ckpt = None
     start_epoch = 0
@@ -64,8 +65,6 @@ def run(seed, epochs, batch_size, checkpoint_interval):
 
     else:
         print("Starting fresh from epoch 1")
-
-    model = model.to(device)
 
     train_loader, val_loader = create_dataloaders(data_dir, batch_size)
 
