@@ -215,6 +215,13 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     print(f"Creating mixed weights...")
     create_mixed_weights(model, masks)
 
+    # Save BN stats BEFORE training (will be restored for sparse evaluation)
+    bn_stats = {}
+    for name, module in model.named_modules():
+        if isinstance(module, nn.BatchNorm2d):
+            bn_stats[name] = (module.running_mean.clone(), module.running_var.clone())
+    print(f"Saved BN stats for {len(bn_stats)} BatchNorm layers")
+
     # Move model to device FIRST
     model = model.to(device)
 
@@ -223,6 +230,7 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     from copy import deepcopy
     from sparse import apply_nm_sparsity
     model_masked = deepcopy(model)
+    # BN stats are already from pre-training, no need to restore
     apply_nm_sparsity(model_masked, masks)
     val_loss_before, val_acc_before = evaluate(model_masked, val_loader, device)
     print(f"4A - Before retrain (sparse): val_acc = {val_acc_before:.2f}%")
@@ -233,7 +241,7 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     train_loader, val_loader = create_dataloaders(data_dir, 128)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=0)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     # Now pass optimizer to freeze_sparse_weights to reset momentum buffers
@@ -296,6 +304,11 @@ def run(epochs=30, lr=0.01, checkpoint_interval=5):
     print(f"4B - After retrain (all weights): val_acc = {val_acc_after:.2f}%")
 
     # Evaluate with masks applied (sparse inference)
+    # Restore BN stats to Phase 4 pre-training values (saved before training)
+    for name, module in model.named_modules():
+        if isinstance(module, nn.BatchNorm2d) and name in bn_stats:
+            module.running_mean, module.running_var = bn_stats[name]
+
     model_masked = deepcopy(model)
     apply_nm_sparsity(model_masked, masks)
     val_loss_masked, val_acc_masked = evaluate(model_masked, val_loader, device)

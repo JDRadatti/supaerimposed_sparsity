@@ -8,6 +8,8 @@ Workflow:
 4. Save masks to phase2_masks.pt
 """
 
+# NOTE: DON"T SPARSIFY FIRST LAST LAYER
+
 import torch
 from pathlib import Path
 
@@ -68,4 +70,3 @@ def run(n, m):
     print(f"\nPhase 2 complete!")
     print(f"Masks saved to: {masks_path}")
     print(f"Original weights saved in model._saved_weights_info")
-
