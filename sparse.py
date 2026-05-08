@@ -136,6 +136,9 @@ def inject_switchable_masks(
         if module in first_last:
             continue
 
+        if hasattr(module, 'nm_mask'):
+            continue
+
         # 1. Generate the N:M Mask
         w = module.weight.detach()
         if isinstance(module, nn.Conv2d):

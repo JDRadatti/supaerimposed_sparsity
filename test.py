@@ -13,6 +13,7 @@ from sparse import (
     _nm_mask_linear,
     inject_switchable_masks,
 )
+from vgg import restore_non_inverse_params
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ class TinyModel(nn.Module):
         return self.fc2(x)
 
     def set_sparsity_mode(self, mode="dense"):
-        assert mode in ["dense", "sparse", "tune_inverse", "tune_inverse_freeze_bn"]
+        assert mode in ["dense", "sparse", "tune_inverse", "tune_inverse_freeze_bn", "tune_inverse_freeze_all"]
         self.use_sparse = mode == "sparse"
         if hasattr(self, '_frozen_bn_modules'):
             for m in self._frozen_bn_modules:
@@ -42,6 +43,10 @@ class TinyModel(nn.Module):
                 for p in m.parameters():
                     p.requires_grad = True
             self._frozen_bn_modules.clear()
+        if hasattr(self, '_frozen_extra_items'):
+            for param, orig_requires_grad in self._frozen_extra_items:
+                param.requires_grad = orig_requires_grad
+            self._frozen_extra_items.clear()
         for m in self.modules():
             if hasattr(m, "nm_mask"):
                 m.use_sparse = (mode == "sparse")
@@ -52,7 +57,7 @@ class TinyModel(nn.Module):
                     m._sparse_hook_handle = m.weight.register_hook(
                         lambda grad, mod=m: grad * mod.nm_mask
                     )
-                elif mode in ("tune_inverse", "tune_inverse_freeze_bn"):
+                elif mode in ("tune_inverse", "tune_inverse_freeze_bn", "tune_inverse_freeze_all"):
                     m._sparse_hook_handle = m.weight.register_hook(
                         lambda grad, mod=m: grad * (1 - mod.nm_mask)
                     )
@@ -64,6 +69,25 @@ class TinyModel(nn.Module):
                     for p in m.parameters():
                         p.requires_grad = False
                     self._frozen_bn_modules.append(m)
+        if mode == "tune_inverse_freeze_all":
+            self._frozen_bn_modules = []
+            self._frozen_extra_items = []
+            for m in self.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+                    for p in m.parameters():
+                        p.requires_grad = False
+                    self._frozen_bn_modules.append(m)
+            for m in self.modules():
+                if isinstance(m, (nn.Conv2d, nn.Linear)):
+                    if not hasattr(m, 'nm_mask'):
+                        for p in m.parameters():
+                            self._frozen_extra_items.append((p, p.requires_grad))
+                            p.requires_grad = False
+                    else:
+                        if m.bias is not None:
+                            self._frozen_extra_items.append((m.bias, m.bias.requires_grad))
+                            m.bias.requires_grad = False
 
 
 class TinyModelWithBN(nn.Module):
@@ -331,6 +355,39 @@ class TestSparseTrainingIsolation(unittest.TestCase):
             "Masked weights must stay frozen across training",
         )
 
+    def test_non_masked_weights_unchanged_after_sparse_training(self):
+        original_weights = self.model.fc1.weight.data.clone()
+        frozen_positions = self.mask == 0
+
+        optimizer = optim.SGD([
+            {"params": [self.model.fc1.weight], "weight_decay": 0},
+            {"params": [self.model.conv1.weight, self.model.fc2.weight]},
+        ], lr=0.01, momentum=0.9)
+        for _ in range(10):
+            optimizer.zero_grad()
+            self.model(torch.randn(4, 1, 8, 8)).sum().backward()
+            optimizer.step()
+
+        self.assertTrue(
+            torch.allclose(original_weights[frozen_positions],
+                           self.model.fc1.weight.data[frozen_positions]),
+            "Non-masked weights must be untouched after sparse training — superimposition broken"
+        )
+
+    def test_mask_unchanged_after_sparse_training(self):
+        original_mask = self.model.fc1.nm_mask.clone()
+        optimizer = optim.SGD([
+            {"params": [self.model.fc1.weight], "weight_decay": 0},
+            {"params": [self.model.conv1.weight, self.model.fc2.weight]},
+        ], lr=0.01, momentum=0.9)
+        for _ in range(5):
+            optimizer.zero_grad()
+            self.model(torch.randn(4, 1, 8, 8)).sum().backward()
+            optimizer.step()
+
+        self.assertTrue(torch.equal(original_mask, self.model.fc1.nm_mask),
+                        "nm_mask buffer must not change during training")
+
 
 # ---------------------------------------------------------------------------
 # 4. Mask Persistence Tests
@@ -419,6 +476,11 @@ class TestTuneInverse(unittest.TestCase):
         inject_switchable_masks(self.model, N=1, M=4)
         self.model.set_sparsity_mode("tune_inverse")
         self.mask = self.model.fc1.nm_mask
+
+    def test_tune_inverse_uses_dense_forward(self):
+        self.model.set_sparsity_mode("tune_inverse")
+        self.assertFalse(self.model.fc1.use_sparse,
+                         "tune_inverse should use dense forward (use_sparse=False)")
 
     def test_inverse_weights_update(self):
         """3:4 weights (inverse mask) should update."""
@@ -602,6 +664,215 @@ class TestBatchNormFreeze(unittest.TestCase):
                         "BN weight should be trainable again after switch")
         self.assertTrue(self.model.bn1.training,
                         "BN should be in train mode again after switch")
+
+
+# ---------------------------------------------------------------------------
+# 8. Restore Non-Inverse Params Tests
+# ---------------------------------------------------------------------------
+
+class TestRestoreNonInverseParams(unittest.TestCase):
+    """Tests for restore_non_inverse_params."""
+
+    def setUp(self):
+        self.model = TinyModelWithBN()
+        inject_switchable_masks(self.model, N=1, M=4)
+        self.saved_sd = copy.deepcopy(self.model.state_dict())
+
+    def test_restores_all_params_by_default(self):
+        """If no training happened, restore should be a no-op."""
+        restore_non_inverse_params(self.model, self.saved_sd)
+        current_sd = self.model.state_dict()
+        for key in self.saved_sd:
+            self.assertTrue(
+                torch.equal(self.saved_sd[key].cpu(), current_sd[key].cpu()),
+                f"{key} should match after restore",
+            )
+
+    def test_restores_1_of_4_positions_from_saved(self):
+        """1:4 weight positions should be restored from saved state."""
+        mask = self.model.fc1.nm_mask
+        pre = self.model.fc1.weight.data.clone()
+        # Modify 1:4 positions in current weights
+        self.model.fc1.weight.data[mask == 1] = torch.randn(int(mask.sum().item()))
+        # Restore
+        restore_non_inverse_params(self.model, self.saved_sd)
+        # 1:4 positions should be back to saved values
+        restored = self.model.fc1.weight.data
+        self.assertTrue(
+            torch.equal(restored[mask == 1], self.saved_sd['fc1.weight'][mask == 1].to(restored.device)),
+            "1:4 weight positions should be restored",
+        )
+
+    def test_keeps_3_of_4_positions_unchanged(self):
+        """3:4 weight positions should NOT be overwritten by restore."""
+        mask = self.model.fc1.nm_mask
+        pre = self.model.fc1.weight.data.clone()
+        # Modify 3:4 positions
+        n_3of4 = int(mask.numel() - mask.sum().item())
+        self.model.fc1.weight.data[mask == 0] = torch.randn(n_3of4)
+        restore_non_inverse_params(self.model, self.saved_sd)
+        # 3:4 positions should keep their modified values
+        restored = self.model.fc1.weight.data
+        self.assertFalse(
+            torch.equal(restored[mask == 0], self.saved_sd['fc1.weight'][mask == 0].to(restored.device)),
+            "3:4 weight positions should NOT be restored",
+        )
+
+    def test_restores_bn_stats(self):
+        """BN running stats should be fully restored."""
+        self.model.bn1.running_mean += 10.0
+        self.model.bn1.running_var += 5.0
+        restore_non_inverse_params(self.model, self.saved_sd)
+        self.assertTrue(
+            torch.equal(self.model.bn1.running_mean, self.saved_sd['bn1.running_mean'].to(self.model.bn1.running_mean.device)),
+            "BN running_mean should be restored",
+        )
+        self.assertTrue(
+            torch.equal(self.model.bn1.running_var, self.saved_sd['bn1.running_var'].to(self.model.bn1.running_var.device)),
+            "BN running_var should be restored",
+        )
+
+    def test_restores_first_layer(self):
+        """First layer (no mask) should be fully restored."""
+        self.model.conv1.weight.data += 1.0
+        restore_non_inverse_params(self.model, self.saved_sd)
+        self.assertTrue(
+            torch.equal(self.model.conv1.weight, self.saved_sd['conv1.weight'].to(self.model.conv1.weight.device)),
+            "First layer weights should be fully restored",
+        )
+
+    def test_restores_last_layer(self):
+        """Last layer (no mask) should be fully restored."""
+        self.model.fc2.weight.data += 1.0
+        restore_non_inverse_params(self.model, self.saved_sd)
+        self.assertTrue(
+            torch.equal(self.model.fc2.weight, self.saved_sd['fc2.weight'].to(self.model.fc2.weight.device)),
+            "Last layer weights should be fully restored",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. Tune Inverse Freeze All Tests
+# ---------------------------------------------------------------------------
+
+class TestTuneInverseFreezeAll(unittest.TestCase):
+    """Tests that tune_inverse_freeze_all freezes everything except 3:4 weights."""
+
+    def setUp(self):
+        self.model = TinyModelWithBN()
+        inject_switchable_masks(self.model, N=1, M=4)
+
+    def _train_step(self, model):
+        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        out = model(torch.randn(4, 1, 8, 8))
+        out.sum().backward()
+        optimizer.step()
+
+    def test_forward_is_dense(self):
+        """Forward should use all weights (like dense)."""
+        self.model.set_sparsity_mode("dense")
+        self.model.eval()
+        x = torch.randn(2, 1, 8, 8)
+        out_dense = self.model(x)
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        self.model.eval()
+        out_freeze = self.model(x)
+        self.assertTrue(torch.allclose(out_dense, out_freeze),
+                        "freeze_all forward should match dense forward")
+
+    def test_bn_running_stats_frozen(self):
+        """BN running_mean/var should NOT update."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        pre_mean = self.model.bn1.running_mean.clone()
+        pre_var = self.model.bn1.running_var.clone()
+        self._train_step(self.model)
+        self.assertTrue(torch.equal(pre_mean, self.model.bn1.running_mean))
+        self.assertTrue(torch.equal(pre_var, self.model.bn1.running_var))
+
+    def test_bn_affine_params_frozen(self):
+        """BN weight and bias should NOT change."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        pre_w = self.model.bn1.weight.clone()
+        pre_b = self.model.bn1.bias.clone()
+        self._train_step(self.model)
+        self.assertTrue(torch.equal(pre_w, self.model.bn1.weight))
+        self.assertTrue(torch.equal(pre_b, self.model.bn1.bias))
+
+    def test_first_layer_frozen(self):
+        """First conv layer (no mask) should NOT change."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        pre = self.model.conv1.weight.clone()
+        self._train_step(self.model)
+        self.assertTrue(torch.equal(pre, self.model.conv1.weight),
+                        "First layer should be frozen")
+
+    def test_last_layer_frozen(self):
+        """Last linear layer (no mask) should NOT change."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        pre = self.model.fc2.weight.clone()
+        self._train_step(self.model)
+        self.assertTrue(torch.equal(pre, self.model.fc2.weight),
+                        "Last layer should be frozen")
+
+    def test_masked_layer_bias_frozen(self):
+        """Bias of masked layers should NOT change."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        pre = self.model.fc1.bias.clone()
+        self._train_step(self.model)
+        self.assertTrue(torch.equal(pre, self.model.fc1.bias),
+                        "Bias of masked layer should be frozen")
+
+    def test_sparse_weights_frozen(self):
+        """1:4 weight positions should NOT change."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        mask = self.model.fc1.nm_mask
+        pre = self.model.fc1.weight.data[mask == 1].clone()
+        self._train_step(self.model)
+        self.assertTrue(
+            torch.equal(pre, self.model.fc1.weight.data[mask == 1]),
+            "1:4 weights must stay frozen",
+        )
+
+    def test_inverse_weights_update(self):
+        """3:4 weight positions SHOULD update."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        mask = self.model.fc1.nm_mask
+        pre = self.model.fc1.weight.data[mask == 0].clone()
+        self._train_step(self.model)
+        self.assertFalse(
+            torch.equal(pre, self.model.fc1.weight.data[mask == 0]),
+            "3:4 weights should update",
+        )
+
+    def test_bn_restored_after_mode_switch(self):
+        """BN should become trainable again after switching away."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        self.model.set_sparsity_mode("dense")
+        self.assertTrue(self.model.bn1.weight.requires_grad)
+        self.assertTrue(self.model.bn1.training)
+
+    def test_first_layer_restored_after_mode_switch(self):
+        """First layer should become trainable after switching away."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        self.model.set_sparsity_mode("dense")
+        self.assertTrue(self.model.conv1.weight.requires_grad)
+
+    def test_masked_bias_restored_after_mode_switch(self):
+        """Masked layer bias should become trainable after switching away."""
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        self.model.set_sparsity_mode("dense")
+        self.assertTrue(self.model.fc1.bias.requires_grad)
+
+    def test_hooks_match_tune_inverse(self):
+        """Weight gradient hook should be identical to regular tune_inverse."""
+        self.model.eval()
+        self.model.set_sparsity_mode("tune_inverse")
+        x = torch.randn(2, 1, 8, 8)
+        out_a = self.model(x)
+        self.model.set_sparsity_mode("tune_inverse_freeze_all")
+        out_b = self.model(x)
+        self.assertTrue(torch.allclose(out_a, out_b),
+                        "Forward should be identical (same weight hook)")
 
 
 if __name__ == "__main__":

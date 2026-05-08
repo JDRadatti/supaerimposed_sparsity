@@ -2,7 +2,7 @@ import copy
 import os
 import torch
 
-from vgg import build_model, train, evaluate, create_dataloaders
+from vgg import build_model, train, evaluate, create_dataloaders, restore_non_inverse_params
 from sparse import inject_switchable_masks
 
 EPOCHS = 30
@@ -67,9 +67,6 @@ def main():
     #
     print("\n--- Phase 3a: Tune Inverse (BN unfrozen) ---")
     if os.path.exists(TUNE_INVERSE_PATH):
-        inject_switchable_masks(
-            model, N=1, M=4, conv_axis="out", linear_orientation="row"
-        )
         model.load_state_dict(torch.load(TUNE_INVERSE_PATH, weights_only=True))
     else:
         model.set_sparsity_mode("tune_inverse")
@@ -83,20 +80,37 @@ def main():
     #
     print("\n--- Phase 3b: Tune Inverse (BN frozen) ---")
     if os.path.exists(TUNE_FREEZE_BN_PATH):
-        inject_switchable_masks(
-            model, N=1, M=4, conv_axis="out", linear_orientation="row"
-        )
         model.load_state_dict(torch.load(TUNE_FREEZE_BN_PATH, weights_only=True))
     else:
-        inject_switchable_masks(
-            model, N=1, M=4, conv_axis="out", linear_orientation="row"
-        )
         model.load_state_dict(torch.load(SUPERIMPOSED_PATH, weights_only=True))
         model = model.to(DEVICE)
         model.set_sparsity_mode("tune_inverse_freeze_bn")
         train(model, epochs=10)
         torch.save(model.state_dict(), TUNE_FREEZE_BN_PATH)
     model = model.to(DEVICE)
+    check_accuracy(model, VAL_LOADER, DEVICE)
+
+
+    #
+    # 3c. Tune inverse with save/restore of non-3:4 params
+    #
+    print("\n--- Phase 3c: Tune Inverse (save/restore non-3:4 params) ---")
+    model.load_state_dict(torch.load(SUPERIMPOSED_PATH, weights_only=True))
+    model = model.to(DEVICE)
+    saved_state = copy.deepcopy(model.state_dict())
+    model.set_sparsity_mode("tune_inverse")
+    train(model, epochs=10)
+    restore_non_inverse_params(model, saved_state)
+    check_accuracy(model, VAL_LOADER, DEVICE)
+
+    #
+    # 3d. Tune inverse with everything frozen except 3:4 weight positions
+    #
+    print("\n--- Phase 3d: Tune Inverse (freeze all except 3:4) ---")
+    model.load_state_dict(torch.load(SUPERIMPOSED_PATH, weights_only=True))
+    model = model.to(DEVICE)
+    model.set_sparsity_mode("tune_inverse_freeze_all")
+    train(model, epochs=10)
     check_accuracy(model, VAL_LOADER, DEVICE)
 
 

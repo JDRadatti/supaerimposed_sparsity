@@ -67,9 +67,10 @@ class VGG16(nn.Module):
 
         self._init_weights()
 
-        self.sparsity_modes = ["dense", "sparse", "tune_inverse", "tune_inverse_freeze_bn"]
+        self.sparsity_modes = ["dense", "sparse", "tune_inverse", "tune_inverse_freeze_bn", "tune_inverse_freeze_all"]
         self.sparsity_mode = self.sparsity_modes[0]
         self._frozen_bn_modules = []
+        self._frozen_extra_items = []
 
     def _init_weights(self):
         for m in self.modules():
@@ -99,6 +100,9 @@ class VGG16(nn.Module):
         - 'sparse': 1:4 weights active, 1:4 weights train.
         - 'tune_inverse': All weights active, only non-1:4 weights train.
         - 'tune_inverse_freeze_bn': Same as tune_inverse but BN frozen.
+        - 'tune_inverse_freeze_all': All weights active, only 3:4 weight
+          positions train. BN, first/last layers, and biases of masked
+          layers are all frozen.
         """
         assert mode in self.sparsity_modes, f"ERROR: invalid sparsity mode '{mode}'"
         self.sparsity_mode = mode
@@ -109,6 +113,11 @@ class VGG16(nn.Module):
             for p in m.parameters():
                 p.requires_grad = True
         self._frozen_bn_modules.clear()
+
+        # Restore previously frozen extra params
+        for param, orig_requires_grad in self._frozen_extra_items:
+            param.requires_grad = orig_requires_grad
+        self._frozen_extra_items.clear()
 
         for m in self.modules():
             if hasattr(m, 'nm_mask'):
@@ -125,7 +134,7 @@ class VGG16(nn.Module):
                     m._sparse_hook_handle = m.weight.register_hook(
                         lambda grad, mod=m: grad * mod.nm_mask
                     )
-                elif mode in ("tune_inverse", "tune_inverse_freeze_bn"):
+                elif mode in ("tune_inverse", "tune_inverse_freeze_bn", "tune_inverse_freeze_all"):
                     m._sparse_hook_handle = m.weight.register_hook(
                         lambda grad, mod=m: grad * (1 - mod.nm_mask)
                     )
@@ -139,6 +148,25 @@ class VGG16(nn.Module):
                     for p in m.parameters():
                         p.requires_grad = False
                     self._frozen_bn_modules.append(m)
+
+        # tune_inverse_freeze_all: freeze everything except 3:4 weight positions
+        if mode == "tune_inverse_freeze_all":
+            for m in self.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+                    for p in m.parameters():
+                        p.requires_grad = False
+                    self._frozen_bn_modules.append(m)
+            for m in self.modules():
+                if isinstance(m, (nn.Conv2d, nn.Linear)):
+                    if not hasattr(m, 'nm_mask'):
+                        for p in m.parameters():
+                            self._frozen_extra_items.append((p, p.requires_grad))
+                            p.requires_grad = False
+                    else:
+                        if m.bias is not None:
+                            self._frozen_extra_items.append((m.bias, m.bias.requires_grad))
+                            m.bias.requires_grad = False
 
 def build_model(
     num_classes=10,
@@ -202,6 +230,31 @@ def evaluate(model, loader, device):
         total += images.size(0)
 
     return loss_sum / total, 100.0 * correct / total
+
+
+@torch.no_grad()
+def restore_non_inverse_params(model, saved_sd):
+    """Restore everything except 3:4 weight positions from a saved state dict.
+
+    For masked layers, only the 1:4 weight positions are restored
+    (3:4 positions keep their current values). All other parameters
+    (first/last layers, biases, BN stats, BN affine params) are
+    fully restored to the saved values.
+    """
+    current_sd = model.state_dict()
+    for key in saved_sd:
+        if key not in current_sd or current_sd[key].shape != saved_sd[key].shape:
+            continue
+        param = current_sd[key]
+        saved = saved_sd[key]
+        parts = key.rsplit('.', 1)
+        if len(parts) == 2 and parts[1] == 'weight':
+            mask_key = parts[0] + '.nm_mask'
+            if mask_key in saved_sd:
+                mask = saved_sd[mask_key]
+                param[mask == 1] = saved[mask == 1].to(param.device)
+                continue
+        param.copy_(saved.to(param.device))
 
 
 def train(model, epochs=20, lr=None, step_size=None):
