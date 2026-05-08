@@ -67,8 +67,9 @@ class VGG16(nn.Module):
 
         self._init_weights()
 
-        self.sparsity_modes = ["dense", "sparse"]
+        self.sparsity_modes = ["dense", "sparse", "tune_inverse", "tune_inverse_freeze_bn"]
         self.sparsity_mode = self.sparsity_modes[0]
+        self._frozen_bn_modules = []
 
     def _init_weights(self):
         for m in self.modules():
@@ -91,12 +92,53 @@ class VGG16(nn.Module):
         x = torch.flatten(x, 1)
         return self.classifier(x)
 
-    def set_sparsity_mode(self, mode="dense"):
-        assert mode in self.sparsity_modes, "ERROR: invalid sparsity mode"
+    def set_sparsity_mode(self, mode):
+        """
+        Modes:
+        - 'dense': All weights active, all weights train.
+        - 'sparse': 1:4 weights active, 1:4 weights train.
+        - 'tune_inverse': All weights active, only non-1:4 weights train.
+        - 'tune_inverse_freeze_bn': Same as tune_inverse but BN frozen.
+        """
+        assert mode in self.sparsity_modes, f"ERROR: invalid sparsity mode '{mode}'"
         self.sparsity_mode = mode
+
+        # Restore previously frozen BN modules
+        for m in self._frozen_bn_modules:
+            m.train()
+            for p in m.parameters():
+                p.requires_grad = True
+        self._frozen_bn_modules.clear()
+
         for m in self.modules():
-            if hasattr(m, 'use_sparse'):
+            if hasattr(m, 'nm_mask'):
+                # Forward pass behavior
                 m.use_sparse = (mode == "sparse")
+
+                # Remove old hook handle if any
+                if hasattr(m, '_sparse_hook_handle'):
+                    m._sparse_hook_handle.remove()
+                    del m._sparse_hook_handle
+
+                # Register gradient hook for current mode
+                if mode == "sparse":
+                    m._sparse_hook_handle = m.weight.register_hook(
+                        lambda grad, mod=m: grad * mod.nm_mask
+                    )
+                elif mode in ("tune_inverse", "tune_inverse_freeze_bn"):
+                    m._sparse_hook_handle = m.weight.register_hook(
+                        lambda grad, mod=m: grad * (1 - mod.nm_mask)
+                    )
+                # mode == "dense": no hook — all weights train naturally
+
+        # Freeze BN in tune_inverse_freeze_bn mode
+        if mode == "tune_inverse_freeze_bn":
+            for m in self.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+                    for p in m.parameters():
+                        p.requires_grad = False
+                    self._frozen_bn_modules.append(m)
 
 def build_model(
     num_classes=10,
@@ -166,13 +208,31 @@ def train(model, epochs=20):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
+    # Re-apply sparsity mode so gradient hooks register on correct device
+    if hasattr(model, 'set_sparsity_mode'):
+        model.set_sparsity_mode(model.sparsity_mode)
+
     train_loader, val_loader = create_dataloaders("./data", 128, 4)
 
-    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+    # Auto-detect modules with masks → weight_decay=0 (gradient hooks handle the rest)
+    sparse_param_ids = set()
+    for m in model.modules():
+        if hasattr(m, 'nm_mask'):
+            sparse_param_ids.add(id(m.weight))
+
+    sparse_params = [p for p in model.parameters() if id(p) in sparse_param_ids]
+    dense_params = [p for p in model.parameters() if id(p) not in sparse_param_ids]
+
+    optimizer = optim.SGD([
+        {'params': dense_params, 'weight_decay': 5e-4},
+        {'params': sparse_params, 'weight_decay': 0},
+    ], lr=0.1, momentum=0.9)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.5)
 
     for epoch in range(epochs):
         model.train()
+        for m in getattr(model, '_frozen_bn_modules', []):
+            m.eval()
         total, correct, loss_sum = 0, 0, 0
 
         for images, targets in train_loader:

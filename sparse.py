@@ -193,12 +193,7 @@ def inject_switchable_masks(
         module.register_buffer('nm_mask', mask)
         module.use_sparse = False # Default state
 
-        # 3. Gradient hook: zero gradients for masked (pruned) entries
-        # This combines with custom param groups in train_sparse (weight_decay=0)
-        # to fully isolate masked weights from any update.
-        module.weight.register_hook(lambda grad, mod=module: grad * mod.nm_mask)
-
-        # 4. Dynamic Forward Patching
+        # 3. Dynamic Forward Patching
         original_forward = module.forward
         
         def make_new_forward(m, old_f):
@@ -231,7 +226,7 @@ def train_sparse(model, epochs=10):
 
     # Build param groups: masked params get weight_decay=0 so their
     # values don't decay during sparse fine-tuning. The gradient hooks
-    # from inject_switchable_masks already zero their gradients.
+    # from set_sparsity_mode already zero their gradients.
     sparse_param_ids = set()
     for module in model.modules():
         if hasattr(module, 'nm_mask'):
@@ -264,8 +259,8 @@ def train_sparse(model, epochs=10):
 
             loss.backward()
             
-            # The gradient hooks we added in 'inject_switchable_masks' 
-            # will automatically zero out gradients for masked weights here.
+            # The gradient hooks from set_sparsity_mode("sparse")
+            # zero out gradients for masked weights here.
             
             optimizer.step()
 
