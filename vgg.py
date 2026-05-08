@@ -67,6 +67,9 @@ class VGG16(nn.Module):
 
         self._init_weights()
 
+        self.sparsity_modes = ["dense", "sparse"]
+        self.sparsity_mode = self.sparsity_modes[0]
+
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -88,6 +91,12 @@ class VGG16(nn.Module):
         x = torch.flatten(x, 1)
         return self.classifier(x)
 
+    def set_sparsity_mode(self, mode="dense"):
+        assert mode in self.sparsity_modes, "ERROR: invalid sparsity mode"
+        self.sparsity_mode = mode
+        for m in self.modules():
+            if hasattr(m, 'use_sparse'):
+                m.use_sparse = (mode == "sparse")
 
 def build_model(
     num_classes=10,
