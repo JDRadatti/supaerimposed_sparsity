@@ -3,7 +3,7 @@ import os
 import torch
 
 from vgg import build_model, train, evaluate, create_dataloaders
-from sparse import inject_switchable_masks, train_sparse
+from sparse import inject_switchable_masks
 
 EPOCHS = 30
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -16,12 +16,10 @@ _, VAL_LOADER = create_dataloaders("./data", 128, 4)
 
 
 def check_accuracy(model, val_loader, device):
-    # Check 1:4 (sparse) Accuracy
     model.set_sparsity_mode("sparse")
     _, sparse_acc = evaluate(model, val_loader, DEVICE)
     print(f"Sparse (1:4) Accuracy: {sparse_acc}%")
 
-    # Check 1:1 (dense) Accuracy
     model.set_sparsity_mode("dense")
     _, dense_acc = evaluate(model, val_loader, DEVICE)
     print(f"Dense (1:1) Accuracy: {dense_acc}%")
@@ -59,7 +57,7 @@ def main():
             model, N=1, M=4, conv_axis="out", linear_orientation="row"
         )
         model.set_sparsity_mode("sparse")
-        train_sparse(model, epochs=EPOCHS)
+        train(model, epochs=EPOCHS)
         torch.save(model.state_dict(), SUPERIMPOSED_PATH)
     model = model.to(DEVICE)
     check_accuracy(model, VAL_LOADER, DEVICE)
@@ -90,7 +88,6 @@ def main():
         )
         model.load_state_dict(torch.load(TUNE_FREEZE_BN_PATH, weights_only=True))
     else:
-        # Reload clean sparse model so BN stats are correct for sparse mode
         inject_switchable_masks(
             model, N=1, M=4, conv_axis="out", linear_orientation="row"
         )

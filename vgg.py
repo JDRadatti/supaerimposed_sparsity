@@ -204,13 +204,20 @@ def evaluate(model, loader, device):
     return loss_sum / total, 100.0 * correct / total
 
 
-def train(model, epochs=20):
+def train(model, epochs=20, lr=None, step_size=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
     # Re-apply sparsity mode so gradient hooks register on correct device
     if hasattr(model, 'set_sparsity_mode'):
         model.set_sparsity_mode(model.sparsity_mode)
+
+    # Mode-aware defaults
+    is_dense = model.sparsity_mode == "dense"
+    if lr is None:
+        lr = 0.1 if is_dense else 0.01
+    if step_size is None:
+        step_size = 6 if is_dense else 3
 
     train_loader, val_loader = create_dataloaders("./data", 128, 4)
 
@@ -226,8 +233,8 @@ def train(model, epochs=20):
     optimizer = optim.SGD([
         {'params': dense_params, 'weight_decay': 5e-4},
         {'params': sparse_params, 'weight_decay': 0},
-    ], lr=0.1, momentum=0.9)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.5)
+    ], lr=lr, momentum=0.9)
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.5)
 
     for epoch in range(epochs):
         model.train()

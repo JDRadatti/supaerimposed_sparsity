@@ -169,6 +169,28 @@ def inject_switchable_masks(
     conv_axis: str = "out",
     linear_orientation: str = "row",
 ):
+    """
+    Inject N:M switchable sparsity masks into all Conv2d / Linear layers of
+    'model', skipping the very first and very last such layers.
+
+    For each eligible layer this function:
+
+    1. Computes the N:M mask from the current weights and registers it as a
+       persistent buffer (``module.nm_mask``).
+    2. Sets ``module.use_sparse = False`` (dense mode by default).
+    3. Patches ``module.forward`` so that when ``use_sparse`` is
+       ``True`` the weight is multiplied by the mask before the operation.
+
+    Calling this function more than once on the same model is safe.
+
+    Args:
+        model:               The target ``nn.Module``.
+        N:                   Number of weights to keep per group.
+        M:                   Group size.
+        conv_axis:           Axis for Conv2d mask (``"out"`` or ``"in"``).
+        linear_orientation:  Orientation for Linear mask (``"row"`` or
+                             ``"col"``).
+    """
     # Identify first & last Conv/Linear to skip
     conv_linear = [
         m 
@@ -194,10 +216,11 @@ def inject_switchable_masks(
         module.use_sparse = False # Default state
 
         # 3. Dynamic Forward Patching
-        original_forward = module.forward
+        if not hasattr(module, "_original_forward"):
+            module._original_forward = module.forward
         
-        def make_new_forward(m, old_f):
-            def new_forward(input):
+        def _make_forward(m):
+            def _forward(input):
                 if getattr(m, 'use_sparse', False):
                     # APPLY MASK: Sparse Mode (1:4)
                     masked_weight = m.weight * m.nm_mask
@@ -209,64 +232,10 @@ def inject_switchable_masks(
                                         m.stride, m.padding, m.dilation, m.groups)
                 else:
                     # DENSE: 1:1 Mode
-                    return old_f(input)
-            return new_forward
+                    return m._original_forward(input)
+            return _forward
 
-        module.forward = make_new_forward(module, original_forward)
+        module.forward = _make_forward(module)
 
 
-def train_sparse(model, epochs=10):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    
-    # Ensure we are in sparse mode
-    model.set_sparsity_mode("sparse")
 
-    train_loader, val_loader = create_dataloaders("./data", 128, 4)
-
-    # Build param groups: masked params get weight_decay=0 so their
-    # values don't decay during sparse fine-tuning. The gradient hooks
-    # from set_sparsity_mode already zero their gradients.
-    sparse_param_ids = set()
-    for module in model.modules():
-        if hasattr(module, 'nm_mask'):
-            sparse_param_ids.add(id(module.weight))
-
-    sparse_params = []
-    dense_params = []
-    for param in model.parameters():
-        if id(param) in sparse_param_ids:
-            sparse_params.append(param)
-        else:
-            dense_params.append(param)
-
-    optimizer = optim.SGD([
-        {'params': dense_params, 'weight_decay': 5e-4},
-        {'params': sparse_params, 'weight_decay': 0},
-    ], lr=0.01, momentum=0.9)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
-
-    for epoch in range(epochs):
-        model.train()
-        total, correct = 0, 0
-
-        for images, targets in train_loader:
-            images, targets = images.to(device), targets.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = nn.CrossEntropyLoss()(outputs, targets)
-
-            loss.backward()
-            
-            # The gradient hooks from set_sparsity_mode("sparse")
-            # zero out gradients for masked weights here.
-            
-            optimizer.step()
-
-            correct += (outputs.argmax(1) == targets).sum().item()
-            total += images.size(0)
-
-        scheduler.step()
-        val_loss, val_acc = evaluate(model, val_loader, device)
-        print(f"Sparse Epoch {epoch+1}: Train Acc {100*correct/total:.2f}% | Val Acc {val_acc:.2f}%")
