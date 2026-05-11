@@ -1,0 +1,65 @@
+=======================================================
+  OVERVIEW — VGG16 on CIFAR-10
+  Generated: 2026-05-11 13:02
+=======================================================
+
+───────────────────────────────────────────────────────
+  Phase 1 — Initial Dense Training
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase1_dense.pt
+  Mask applied: None (dense)
+  Frozen: None
+  Results:
+    dense       loss=0.3232  acc=90.88%
+
+───────────────────────────────────────────────────────
+  Phase 2 — Sparse 1:4 Training (pruned positions frozen)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase2_sparse.pt
+  Mask applied: 1:4 (active during training)
+  Frozen: Inverse mask (pruned / mask==0 positions)
+  Results:
+    1:4         loss=0.3327  acc=91.33%
+    dense       loss=7.5238  acc=51.20%
+
+───────────────────────────────────────────────────────
+  Phase 3a — Freeze mask, train pruned (dense)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase3a_freeze_mask.pt
+  Note: BN statistics were updated for dense activations → sparse eval is poor.
+  Mask applied: 1:4 (eval only; trained in dense mode)
+  Frozen: Mask kept positions (mask==1)
+  Results:
+    1:4         loss=2.4988  acc=10.00%
+    dense       loss=0.5231  acc=83.64%
+
+───────────────────────────────────────────────────────
+  Phase 3b — Freeze mask + biases, train pruned (dense)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase3b_freeze_mask_biases.pt
+  Mask applied: 1:4 (eval only; trained in dense mode)
+  Frozen: Mask kept positions (mask==1) + all biases
+  Results:
+    1:4         loss=2.5078  acc=10.00%
+    dense       loss=0.4470  acc=85.74%
+
+───────────────────────────────────────────────────────
+  Phase 3c — Freeze mask + everything else, train pruned (dense)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase3c_freeze_everything_else.pt
+  Mask applied: 1:4 (eval only; trained in dense mode)
+  Frozen: Mask kept positions (mask==1) + biases + BN params + non-masked layers
+  Results:
+    1:4         loss=2.4883  acc=10.00%
+    dense       loss=0.4294  acc=86.69%
+
+───────────────────────────────────────────────────────
+  Phase 3d — Weight transplant (Phase 3a weights → Phase 2 skeleton)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/phase3d_transplant.txt
+  Note: Transplanted Conv2d/Linear .weight only; kept Phase 2 BN gamma/beta & running stats.
+  Mask applied: 1:4 (evaluated sparsely with Phase 2 BN stats)
+  Frozen: N/A (eval only — no training)
+  Results: (checkpoint not found)
+    Phase 3a model (dense eval)              0.5231     83.64     
+    Phase 2 skeleton + 3a weights (sparse eval) 0.3988     89.07     

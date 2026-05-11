@@ -1,0 +1,4 @@
+Phase 3d — weight transplant
+Config                                   Loss       Acc       
+Phase 3a model (dense eval)              0.5231     83.64     
+Phase 2 skeleton + 3a weights (sparse eval) 0.3988     89.07     
