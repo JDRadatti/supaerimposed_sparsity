@@ -187,4 +187,3 @@ def train(model, epochs=20):
         print(f"Epoch {epoch+1}: "
               f"Train Acc {100*correct/total:.2f}% | "
               f"Val Acc {val_acc:.2f}%")
-
