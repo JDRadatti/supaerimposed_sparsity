@@ -19,7 +19,8 @@ Checkpoints, comparison files, and an overview are saved to `./runs/`.
 
 ## Project Goal
 
-Train a model such that a single set of parameters works at multiple sparsity levels (both 1:4 sparse and 1:1 dense).
+Train a model such that a single set of parameters works at
+multiple sparsity levels (both 1:4 sparse and 1:1 dense).
 
 ## Key Mechanisms
 
@@ -42,23 +43,44 @@ Train a model such that a single set of parameters works at multiple sparsity le
   corrupt frozen positions via weight_decay), and the snapshots are
   restored.
 
-**Validation:**
-- Every five epochs, the model parameters are checked against a snapshot to
-  verify the frozen and masked elements are behaving correctly.
-- Raises RuntimeError if snapshot test fails.
-
-**Visualization:**
-- The model_dict() is saved before and after each phase and a parameter diff is
-  saved to `./runs/`
+**Checkpoint Caching:**
+- Each phase checks for an existing `.pt` checkpoint before training.
+  If found, the phase is skipped and the checkpoint is loaded directly.
+- Delete a checkpoint file to force re-run that phase.
 
 ## Workflow / Phases
 
-| Phase | Description | Mask | Frozen
-|-------|------------|------|--------|
-| 1 | Dense training (30 epochs) | None | Nothing |
-| 2 | Sparse 1:4 training (30 epochs) | 1:4 (active) | Inverse mask |
-| 3a | Freeze mask, train inverse mask (10 epochs) | 1:4 (eval only) | mask==1 |
-| 3b | Freeze mask + biases, train inverse mask (10 epochs) | 1:4 (eval only) | mask==1 + all biases |
-| 3c | Freeze everything except pruned weights (10 epochs) | 1:4 (eval only) | mask==1 + biases + BN + non-masked layers |
-| 3d | Weight transplant: Phase 3a weights → Phase 2 skeleton | 1:4 (eval) | N/A (eval only) |
+| Phase | Description | Mask | Frozen | Eval Modes |
+|-------|------------|------|--------|------------|
+| 1 | Dense training (30 epochs) | None | Nothing | dense |
+| 2 | Sparse 1:4 training (30 epochs) | 1:4 (active) | Inverse mask (pruned positions) | 1:4, dense |
+| 3a | Freeze mask, train pruned in dense (10 epochs) | 1:4 (eval only) | mask==1 | 1:4, dense |
+| 3b | Freeze mask + biases, train pruned (10 epochs) | 1:4 (eval only) | mask==1 + all biases | 1:4, dense |
+| 3c | Freeze everything except pruned (10 epochs) | 1:4 (eval only) | mask==1 + biases + BN + non-masked | 1:4, dense |
+| 3d | Transplant Phase 3a weights → Phase 2 skeleton | 1:4 (eval) | N/A (eval only) | 1:4 |
+| 3d-alt | Transplant from Phase 3a, skip first/last layers | 1:4 (eval) | N/A (eval only) | 1:4 |
+| 3e | Transplant Phase 3c weights → Phase 2 skeleton | 1:4 (eval) | N/A (eval only) | 1:4 |
+| 3f | Freeze all parameters (sanity check, 5 epochs) | 1:4 (eval only) | Every parameter | 1:4, dense |
 
+**Phases 3d/3d-alt/3e** transplant only Conv2d/Linear `.weight` tensors
+(skipping BatchNorm gamma) into a fresh model loaded with Phase 2 state.
+Phase 3d-alt additionally skips the first and last Conv/Linear layers.
+Phase 3e uses Phase 3c weights instead of Phase 3a.
+
+**Phase 3f** freezes every single parameter in the model and runs 5 epochs
+of dense training. It is a sanity check: if the freeze mechanism is correct,
+every weight should remain unchanged and accuracy should exactly match
+Phase 2's loaded eval metrics.
+
+## Output Files
+
+All files are written to `./runs/`:
+
+| File | Contents |
+|------|----------|
+| `overview.txt` | Summary of all phases with mask, freeze, and eval results |
+| `phase*_comparison.txt` | Per-element parameter diff with mask and freeze overlay |
+| `phase*.pt` | Checkpoint with model state dict, masks, freeze info, and eval metrics |
+| `phase3d_transplant.txt` | Phase 3d transplant eval results |
+| `phase3dal_transplant.txt` | Phase 3d-alt transplant eval results |
+| `phase3e_transplant.txt` | Phase 3e transplant eval results |

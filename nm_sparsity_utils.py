@@ -1,4 +1,5 @@
 import os
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -167,18 +168,39 @@ def get_active_sparsity(model: nn.Module) -> str:
 # EVALUATING ALL SPARSITY MODES
 # ---------------------------------------------------------------------------
 
+def recalibrate_bn(model: nn.Module, loader: DataLoader, device: torch.device) -> None:
+    """Recompute BN running statistics for the current active mask.
+
+    Runs one forward pass over *loader* in ``train()`` mode so that
+    each BatchNorm layer updates its ``running_mean`` / ``running_var``
+    based on the activations produced with the currently active mask.
+    The model is left in ``eval()`` mode afterwards.
+    """
+    model.train()
+    with torch.no_grad():
+        for images, _ in loader:
+            model(images.to(device))
+    model.eval()
+
+
 def evaluate_all_sparsity_modes(
         model: nn.Module, 
         loader: DataLoader, 
-        device: torch.device
+        device: torch.device,
+        recalibrate_loader: DataLoader | None = None,
     ) -> dict[str, tuple[float, float]]:
     """
     Evaluates the model on all registered sparsity modes plus dense mode.
+
+    If *recalibrate_loader* is provided, BN running statistics are
+    recomputed on that loader for each sparsity key before evaluation.
+    This ensures BN stats match the activations produced by that mask.
 
     Args:
         model: The nn.Module to evaluate.
         loader: The DataLoader for evaluation.
         device: The torch.device to use.
+        recalibrate_loader: Optional DataLoader for BN recalibration.
 
     Returns:
         A dictionary mapping sparsity key (e.g., "dense", "1:4") to a tuple of (average_loss, accuracy).
@@ -199,12 +221,16 @@ def evaluate_all_sparsity_modes(
 
     for key in sparsity_keys:
         set_active_sparsity(model, key)
+        if recalibrate_loader is not None:
+            recalibrate_bn(model, recalibrate_loader, device)
         _debug_mask_state(model, f"evaluating key='{key}'")
         avg_loss, accuracy = vgg.evaluate(model, loader, device)
         results[key] = (avg_loss, accuracy)
         print(f"[EVAL] Sparsity '{key}': Avg Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2f}%")
     
     set_active_sparsity(model, original_active_key)
+    if recalibrate_loader is not None:
+        recalibrate_bn(model, recalibrate_loader, device)
     return results
 
 
@@ -239,6 +265,13 @@ def train(
     M: int = 0,
     verify_frequency: int = 5,
     freeze_params: list[torch.nn.Parameter] | None = None,
+    # ------------------------------------------------------------------
+    # Optional improvements (backward-compatible defaults)
+    # ------------------------------------------------------------------
+    lr: float = 0.1,
+    scheduler_fn: Callable | None = None,
+    label_smoothing: float = 0.0,
+    cutout: int = 0,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -275,9 +308,12 @@ def train(
     #
     # Optimizer / scheduler / dataloader
     #
-    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.5)
-    train_loader, val_loader = vgg.create_dataloaders("./data", 128, 4)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
+    if scheduler_fn is not None:
+        scheduler = scheduler_fn(optimizer)
+    else:
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.5)
+    train_loader, val_loader = vgg.create_dataloaders("./data", 128, 4, cutout=cutout)
 
     #
     # Take Snapshot
@@ -296,7 +332,7 @@ def train(
 
             optimizer.zero_grad()
             outputs = model(images)
-            loss = nn.CrossEntropyLoss()(outputs, targets)
+            loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)(outputs, targets)
             loss.backward()
 
             zero_frozen_gradients(optimizer)
@@ -528,6 +564,19 @@ def freeze_non_masked_layers(model: nn.Module, sparsity_key: str):
             register_frozen_param(module.weight)
             count += 1
     print(f"[FREEZE] {count} non-masked layers frozen.")
+
+
+def freeze_all(model: nn.Module):
+    """Freeze every single parameter in the model (full-param freeze).
+
+    Useful as a sanity check: training with everything frozen should leave
+    every weight unchanged and accuracy should match the pre-training eval.
+    """
+    count = 0
+    for p in model.parameters():
+        register_frozen_param(p)
+        count += 1
+    print(f"[FREEZE] All {count} parameters frozen.")
 
 
 # ---------------------------------------------------------------------------

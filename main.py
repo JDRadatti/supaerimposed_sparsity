@@ -10,6 +10,7 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.optim import lr_scheduler
 
 from vgg import (
     build_model,
@@ -26,7 +27,7 @@ warnings.filterwarnings(
     module=r"torchvision\.datasets\.cifar",
 )
 
-EPOCHS   = 30
+EPOCHS   = 90
 DEVICE   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = "./runs"
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -70,6 +71,7 @@ def _run_phase(
     name: str,
     model: nn.Module,
     val_loader: DataLoader,
+    train_loader: DataLoader,
     checkpoint_path: str,
     comparison_path: str,
     snapshot_before: dict | None,
@@ -109,7 +111,8 @@ def _run_phase(
         freeze_params=freeze_params,
         **(train_kwargs or {}),
     )
-    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE)
+    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE,
+                                                   recalibrate_loader=train_loader)
     su.save_checkpoint(model, checkpoint_path, metrics={"eval": eval_results})
 
     snap_after = su.parameter_snapshot(model)
@@ -138,7 +141,7 @@ def main() -> None:
     # 0. Init
     #
     model = build_model().to(DEVICE)
-    _, val_loader = create_dataloaders("./data", batch_size=128, num_workers=4)
+    train_loader, val_loader = create_dataloaders("./data", batch_size=128, num_workers=4)
 
     #
     # 1. Initial Training
@@ -148,11 +151,18 @@ def main() -> None:
         name="Dense (1:1)",
         model=model,
         val_loader=val_loader,
+        train_loader=train_loader,
         checkpoint_path=f"{BASE_DIR}/phase1_dense.pt",
         comparison_path=f"{BASE_DIR}/phase1_dense_comparison.txt",
         snapshot_before=snap,
         epochs=EPOCHS,
         N=0, M=0,
+        train_kwargs=dict(
+            lr=0.1,
+            scheduler_fn=lambda opt: lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS),
+            label_smoothing=0.1,
+            cutout=16,
+        ),
     )
 
     #
@@ -171,10 +181,11 @@ def main() -> None:
         name="Sparse 1:4 (pruned positions frozen)",
         model=model,
         val_loader=val_loader,
+        train_loader=train_loader,
         checkpoint_path=f"{BASE_DIR}/phase2_sparse.pt",
         comparison_path=f"{BASE_DIR}/phase2_sparse_comparison.txt",
         snapshot_before=snap,
-        epochs=EPOCHS,
+        epochs=30,
         N=1, M=4,
         sparsity_key="1:4",
     )
@@ -193,10 +204,11 @@ def main() -> None:
         name="Phase 3a — freeze 1:4 mask, train pruned (dense)",
         model=model,
         val_loader=val_loader,
+        train_loader=train_loader,
         checkpoint_path=f"{BASE_DIR}/phase3a_freeze_mask.pt",
         comparison_path=f"{BASE_DIR}/phase3a_freeze_mask_comparison.txt",
         snapshot_before=snap,
-        epochs=10,
+        epochs=30,
         N=0, M=0,
         sparsity_key="1:4",
     )
@@ -212,10 +224,11 @@ def main() -> None:
         name="Phase 3b — freeze mask + biases, train pruned (dense)",
         model=model,
         val_loader=val_loader,
+        train_loader=train_loader,
         checkpoint_path=f"{BASE_DIR}/phase3b_freeze_mask_biases.pt",
         comparison_path=f"{BASE_DIR}/phase3b_freeze_mask_biases_comparison.txt",
         snapshot_before=snap,
-        epochs=10,
+        epochs=30,
         N=0, M=0,
         sparsity_key="1:4",
     )
@@ -233,68 +246,14 @@ def main() -> None:
         name="Phase 3c — freeze mask + everything else, train pruned (dense)",
         model=model,
         val_loader=val_loader,
+        train_loader=train_loader,
         checkpoint_path=f"{BASE_DIR}/phase3c_freeze_everything_else.pt",
         comparison_path=f"{BASE_DIR}/phase3c_freeze_everything_else_comparison.txt",
         snapshot_before=snap,
-        epochs=10,
+        epochs=30,
         N=0, M=0,
         sparsity_key="1:4",
     )
-
-    # ------------------------------------------------------------------
-    # Phase 3d: weight transplant experiment
-    #
-    # 1. Load Phase 3a checkpoint & evaluate densely
-    # 2. Load Phase 2 params
-    # 3. Transplant Phase 3a's .weight tensors into the Phase 2 copy
-    # 4. Evaluate the hybrid model sparsely
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("  Phase 3d — transplant Phase 3a weights into Phase 2 skeleton")
-    print("=" * 60)
-
-    # 1. Load Phase 3a checkpoint & evaluate densely
-    su.load_checkpoint(model, f"{BASE_DIR}/phase3a_freeze_mask.pt")
-    loss_dense, acc_dense = evaluate(model, val_loader, DEVICE)
-    print(f"\n  Phase 3a (dense eval): loss={loss_dense:.4f}  acc={acc_dense:.2f}%")
-
-    # 2. Load Phase 2 params into a fresh model
-    model_hybrid = build_model().to(DEVICE)
-    su.inject_switchable_mask(model_hybrid, "1:4", N=1, M=4,
-                              conv_axis="out", linear_orientation="row")
-    su.load_checkpoint(model_hybrid, f"{BASE_DIR}/phase2_sparse.pt")
-    state_phase2 = model_hybrid.state_dict()
-
-    # 3. Transplant Phase 3a's Conv2d/Linear .weight tensors only
-    #    (skip BatchNorm gamma — it was trained for dense activations
-    #     in Phase 3a and would corrupt sparse evaluation)
-    state_3a = model.state_dict()
-    for key in state_phase2:
-        if key.endswith(".weight"):
-            mod_name = key.rsplit(".weight", 1)[0]
-            if not isinstance(model_hybrid.get_submodule(mod_name), (nn.Conv2d, nn.Linear)):
-                continue
-            state_phase2[key].copy_(state_3a[key])
-
-    # 4. Evaluate hybrid sparsely
-    su.set_active_sparsity(model_hybrid, "1:4")
-    loss_sparse, acc_sparse = evaluate(model_hybrid, val_loader, DEVICE)
-    print(f"  Hybrid   (sparse eval): loss={loss_sparse:.4f}  acc={acc_sparse:.2f}%")
-
-    print(f"\n  {'=' * 50}")
-    print(f"  Phase 3d — weight transplant")
-    print(f"  {'=' * 50}")
-    print(f"  {'Config':<40} {'Loss':<10} {'Acc':<10}")
-    print(f"  {'-' * 60}")
-    print(f"  {'Phase 3a model (dense eval)':<40} {loss_dense:<10.4f} {acc_dense:<10.2f}")
-    print(f"  {'Phase 2 skeleton + 3a weights (sparse eval)':<40} {loss_sparse:<10.4f} {acc_sparse:<10.2f}")
-    print(f"  {'=' * 50}")
-    with open(f"{BASE_DIR}/phase3d_transplant.txt", "w") as f:
-        f.write(f"Phase 3d — weight transplant\n")
-        f.write(f"{'Config':<40} {'Loss':<10} {'Acc':<10}\n")
-        f.write(f"{'Phase 3a model (dense eval)':<40} {loss_dense:<10.4f} {acc_dense:<10.2f}\n")
-        f.write(f"{'Phase 2 skeleton + 3a weights (sparse eval)':<40} {loss_sparse:<10.4f} {acc_sparse:<10.2f}\n")
-    print(f"  [RESULT] saved to {BASE_DIR}/phase3d_transplant.txt")
 
     # ------------------------------------------------------------------
     # Write overview.txt
@@ -326,7 +285,6 @@ def main() -> None:
         checkpoint=f"{BASE_DIR}/phase3a_freeze_mask.pt",
         mask="1:4 (eval only; trained in dense mode)",
         frozen="Mask kept positions (mask==1)",
-        note="BN statistics were updated for dense activations → sparse eval is poor.",
         eval_results=_read_eval(f"{BASE_DIR}/phase3a_freeze_mask.pt"),
     ))
 
@@ -345,16 +303,6 @@ def main() -> None:
         frozen="Mask kept positions (mask==1) + biases + BN params + non-masked layers",
         eval_results=_read_eval(f"{BASE_DIR}/phase3c_freeze_everything_else.pt"),
     ))
-
-    overview.extend(_overview_section(
-        "Phase 3d — Weight transplant (Phase 3a weights → Phase 2 skeleton)",
-        checkpoint=f"{BASE_DIR}/phase3d_transplant.txt",
-        mask="1:4 (evaluated sparsely with Phase 2 BN stats)",
-        frozen="N/A (eval only — no training)",
-        note="Transplanted Conv2d/Linear .weight only; kept Phase 2 BN gamma/beta & running stats.",
-    ))
-    overview.append(f"    {'Phase 3a model (dense eval)':<40} {loss_dense:<10.4f} {acc_dense:<10.2f}")
-    overview.append(f"    {'Phase 2 skeleton + 3a weights (sparse eval)':<40} {loss_sparse:<10.4f} {acc_sparse:<10.2f}")
 
     overview_path = f"{BASE_DIR}/overview.txt"
     with open(overview_path, "w") as f:

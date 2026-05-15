@@ -26,7 +26,6 @@
   Phase 3a — Freeze mask, train pruned (dense)
 ───────────────────────────────────────────────────────
   Checkpoint: ./runs/phase3a_freeze_mask.pt
-  Note: BN statistics were updated for dense activations → sparse eval is poor.
   Mask applied: 1:4 (eval only; trained in dense mode)
   Frozen: Mask kept positions (mask==1)
   Results:

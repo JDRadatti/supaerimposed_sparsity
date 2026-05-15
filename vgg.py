@@ -107,16 +107,22 @@ def build_model(
 # Training utilities (UNCHANGED)
 # ---------------------------------------------------------------------------
 
-def create_dataloaders(data_dir, batch_size, num_workers):
+def create_dataloaders(data_dir, batch_size, num_workers, cutout=0):
     mean = (0.4914, 0.4822, 0.4465)
     std  = (0.2023, 0.1994, 0.2010)
 
-    train_tf = transforms.Compose([
+    train_transforms = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
-    ])
+    ]
+    if cutout > 0:
+        train_transforms.append(
+            transforms.RandomErasing(p=0.5, scale=(cutout / 32, cutout / 32), ratio=(1, 1))
+        )
+
+    train_tf = transforms.Compose(train_transforms)
 
     test_tf = transforms.Compose([
         transforms.ToTensor(),
