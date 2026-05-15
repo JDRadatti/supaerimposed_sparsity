@@ -48,29 +48,28 @@ multiple sparsity levels (both 1:4 sparse and 1:1 dense).
   If found, the phase is skipped and the checkpoint is loaded directly.
 - Delete a checkpoint file to force re-run that phase.
 
+**BatchNorm Recalibration:**
+- When switching between sparsity modes (e.g., dense → 1:4), the
+  activation distribution changes because different weight elements
+  are zeroed. This shifts the input statistics seen by BatchNorm layers.
+- `recalibrate_bn(model, loader, device)` runs one forward pass over
+  the training set in `train()` mode, letting each BN layer recompute
+  its `running_mean` / `running_var` for the currently active mask.
+  The model is returned to `eval()` mode afterwards.
+- `evaluate_all_sparsity_modes` calls this recalibration for every
+  sparsity key before computing accuracy. Without this step, BN stats
+  from dense training would be stale for sparse-mode evaluation and
+  vice versa, producing misleading accuracy numbers.
+
 ## Workflow / Phases
 
 | Phase | Description | Mask | Frozen | Eval Modes |
 |-------|------------|------|--------|------------|
-| 1 | Dense training (30 epochs) | None | Nothing | dense |
+| 1 | Dense training (90 epochs) | None | Nothing | dense |
 | 2 | Sparse 1:4 training (30 epochs) | 1:4 (active) | Inverse mask (pruned positions) | 1:4, dense |
-| 3a | Freeze mask, train pruned in dense (10 epochs) | 1:4 (eval only) | mask==1 | 1:4, dense |
-| 3b | Freeze mask + biases, train pruned (10 epochs) | 1:4 (eval only) | mask==1 + all biases | 1:4, dense |
-| 3c | Freeze everything except pruned (10 epochs) | 1:4 (eval only) | mask==1 + biases + BN + non-masked | 1:4, dense |
-| 3d | Transplant Phase 3a weights → Phase 2 skeleton | 1:4 (eval) | N/A (eval only) | 1:4 |
-| 3d-alt | Transplant from Phase 3a, skip first/last layers | 1:4 (eval) | N/A (eval only) | 1:4 |
-| 3e | Transplant Phase 3c weights → Phase 2 skeleton | 1:4 (eval) | N/A (eval only) | 1:4 |
-| 3f | Freeze all parameters (sanity check, 5 epochs) | 1:4 (eval only) | Every parameter | 1:4, dense |
-
-**Phases 3d/3d-alt/3e** transplant only Conv2d/Linear `.weight` tensors
-(skipping BatchNorm gamma) into a fresh model loaded with Phase 2 state.
-Phase 3d-alt additionally skips the first and last Conv/Linear layers.
-Phase 3e uses Phase 3c weights instead of Phase 3a.
-
-**Phase 3f** freezes every single parameter in the model and runs 5 epochs
-of dense training. It is a sanity check: if the freeze mechanism is correct,
-every weight should remain unchanged and accuracy should exactly match
-Phase 2's loaded eval metrics.
+| 3a | Freeze mask, train pruned in dense (30 epochs) | 1:4 (eval only) | mask==1 | 1:4, dense |
+| 3b | Freeze mask + biases, train pruned (30 epochs) | 1:4 (eval only) | mask==1 + all biases | 1:4, dense |
+| 3c | Freeze everything except pruned (30 epochs) | 1:4 (eval only) | mask==1 + biases + BN + non-masked | 1:4, dense |
 
 ## Output Files
 
@@ -81,6 +80,4 @@ All files are written to `./runs/`:
 | `overview.txt` | Summary of all phases with mask, freeze, and eval results |
 | `phase*_comparison.txt` | Per-element parameter diff with mask and freeze overlay |
 | `phase*.pt` | Checkpoint with model state dict, masks, freeze info, and eval metrics |
-| `phase3d_transplant.txt` | Phase 3d transplant eval results |
-| `phase3dal_transplant.txt` | Phase 3d-alt transplant eval results |
-| `phase3e_transplant.txt` | Phase 3e transplant eval results |
+
