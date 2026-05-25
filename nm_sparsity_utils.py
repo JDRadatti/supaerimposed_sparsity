@@ -3,7 +3,6 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim import lr_scheduler
@@ -954,39 +953,6 @@ def load_checkpoint(
         for key, (loss, acc) in saved_metrics['eval'].items():
             print(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
     return checkpoint
-
-
-# ---------------------------------------------------------------------------
-# TOY MODEL (for testing)
-# ---------------------------------------------------------------------------
-
-class _TinyModel(nn.Module):
-    """Minimal model where every parameter tensor is small enough to print fully."""
-
-    def __init__(self, num_classes=10):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 4, kernel_size=3, padding=1, bias=False),    # first, skipped
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(4, 4, kernel_size=3, padding=1, bias=False),    # masked
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(4, 4, kernel_size=3, padding=1, bias=False),    # masked
-            nn.ReLU(inplace=True),
-        )
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Sequential(
-            nn.Linear(4, 4),                                           # masked
-            nn.ReLU(inplace=True),
-            nn.Linear(4, num_classes),                                 # last, skipped
-        )
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return self.classifier(x)
 
 
 # (no __main__ block; run main.py for the actual pipeline)

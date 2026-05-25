@@ -48,18 +48,19 @@ multiple sparsity levels (both 1:4 sparse and 1:1 dense).
   If found, the phase is skipped and the checkpoint is loaded directly.
 - Delete a checkpoint file to force re-run that phase.
 
-**BatchNorm Recalibration:**
-- When switching between sparsity modes (e.g., dense → 1:4), the
-  activation distribution changes because different weight elements
-  are zeroed. This shifts the input statistics seen by BatchNorm layers.
-- `recalibrate_bn(model, loader, device)` runs one forward pass over
-  the training set in `train()` mode, letting each BN layer recompute
-  its `running_mean` / `running_var` for the currently active mask.
-  The model is returned to `eval()` mode afterwards.
-- `evaluate_all_sparsity_modes` calls this recalibration for every
-  sparsity key before computing accuracy. Without this step, BN stats
-  from dense training would be stale for sparse-mode evaluation and
-  vice versa, producing misleading accuracy numbers.
+**Per‑Sparsity BN Buffers:**
+- Each sparsity key has its own saved BN buffers (`running_mean`,
+  `running_var`, `num_batches_tracked`).
+- `save_active_bn_stats(model)` snapshots the current BN buffers
+  under the currently active sparsity key.
+- `restore_bn_stats(model, key)` restores the saved buffers for a
+  given key before evaluation, ensuring BN statistics match that
+  mask's activation distribution.
+- `train()` automatically calls `save_active_bn_stats` at the end
+  of training. `evaluate_all_sparsity_modes` restores the correct
+  buffers for each key before evaluating.
+- Buffers are persisted in checkpoints alongside masks and freeze
+  info, so the pipeline is fully resumable.
 
 ## Workflow / Phases
 
@@ -79,5 +80,5 @@ All files are written to `./runs/`:
 |------|----------|
 | `overview.txt` | Summary of all phases with mask, freeze, and eval results |
 | `phase*_comparison.txt` | Per-element parameter diff with mask and freeze overlay |
-| `phase*.pt` | Checkpoint with model state dict, masks, freeze info, and eval metrics |
+| `phase*.pt` | Checkpoint with model state dict, masks, freeze info, BN buffers, and eval metrics |
 

@@ -1,10 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.nn.utils.prune as prune
-import torch.optim as optim
-from torch.optim import lr_scheduler
-from vgg import create_dataloaders, evaluate
 
 
 @torch.no_grad()

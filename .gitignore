@@ -1,5 +1,7 @@
 /__pycache__
-.DS_STORE
+.DS_Store
+__MACOSX/
+/old
 /runs
 runs.zip
 /data
