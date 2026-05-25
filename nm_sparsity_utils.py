@@ -165,45 +165,80 @@ def get_active_sparsity(model: nn.Module) -> str:
 
 
 # ---------------------------------------------------------------------------
-# EVALUATING ALL SPARSITY MODES
+# BN BUFFERS (per-sparsity-key)
 # ---------------------------------------------------------------------------
 
-def recalibrate_bn(model: nn.Module, loader: DataLoader, device: torch.device) -> None:
-    """Recompute BN running statistics for the current active mask.
+_bn_buffers: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
+"""Maps sparsity_key -> module_name -> {running_mean, running_var, num_batches_tracked}."""
 
-    Runs one forward pass over *loader* in ``train()`` mode so that
-    each BatchNorm layer updates its ``running_mean`` / ``running_var``
-    based on the activations produced with the currently active mask.
-    The model is left in ``eval()`` mode afterwards.
+
+def _collect_bn_stats(model: nn.Module) -> dict[str, dict[str, torch.Tensor]]:
+    """Capture current BN running stats for every BatchNorm module.
+
+    Returns:
+        ``{module_name: {"running_mean": tensor, "running_var": tensor,
+                         "num_batches_tracked": tensor}}``
     """
-    model.train()
-    with torch.no_grad():
-        for images, _ in loader:
-            model(images.to(device))
-    model.eval()
+    stats = {}
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            stats[name] = {
+                "running_mean": module.running_mean.detach().clone(),
+                "running_var": module.running_var.detach().clone(),
+                "num_batches_tracked": module.num_batches_tracked.detach().clone(),
+            }
+    return stats
 
+
+def _apply_bn_stats(model: nn.Module, bn_dict: dict[str, dict[str, torch.Tensor]]) -> None:
+    """Restore BN running stats from a dict produced by ``_collect_bn_stats``."""
+    for name, module in model.named_modules():
+        if name in bn_dict:
+            module.running_mean.copy_(bn_dict[name]["running_mean"])
+            module.running_var.copy_(bn_dict[name]["running_var"])
+            module.num_batches_tracked.copy_(bn_dict[name]["num_batches_tracked"])
+
+
+def save_active_bn_stats(model: nn.Module) -> None:
+    """Save the current BN buffers under the currently active sparsity key."""
+    key = get_active_sparsity(model)
+    _bn_buffers[key] = _collect_bn_stats(model)
+    n = len(_bn_buffers[key])
+    print(f"[BN] Saved BN buffers for key '{key}' ({n} BN layers).")
+
+
+def restore_bn_stats(model: nn.Module, sparsity_key: str) -> None:
+    """Restore BN buffers for *sparsity_key*.  No‑op if no buffers have been saved."""
+    if sparsity_key in _bn_buffers:
+        _apply_bn_stats(model, _bn_buffers[sparsity_key])
+        print(f"[BN] Restored BN buffers for key '{sparsity_key}'.")
+    else:
+        print(f"[BN] No saved BN buffers for key '{sparsity_key}', using current.")
+
+
+# ---------------------------------------------------------------------------
+# EVALUATING ALL SPARSITY MODES
+# ---------------------------------------------------------------------------
 
 def evaluate_all_sparsity_modes(
         model: nn.Module, 
         loader: DataLoader, 
         device: torch.device,
-        recalibrate_loader: DataLoader | None = None,
     ) -> dict[str, tuple[float, float]]:
     """
     Evaluates the model on all registered sparsity modes plus dense mode.
 
-    If *recalibrate_loader* is provided, BN running statistics are
-    recomputed on that loader for each sparsity key before evaluation.
-    This ensures BN stats match the activations produced by that mask.
+    For each sparsity key the corresponding saved BN buffers (if any)
+    are restored so that BN running statistics match that mask's activations.
 
     Args:
         model: The nn.Module to evaluate.
         loader: The DataLoader for evaluation.
         device: The torch.device to use.
-        recalibrate_loader: Optional DataLoader for BN recalibration.
 
     Returns:
-        A dictionary mapping sparsity key (e.g., "dense", "1:4") to a tuple of (average_loss, accuracy).
+        A dictionary mapping sparsity key (e.g., ``"dense"``, ``"1:4"``)
+        to a tuple of (average_loss, accuracy).
     """
     results = {}
     
@@ -221,16 +256,14 @@ def evaluate_all_sparsity_modes(
 
     for key in sparsity_keys:
         set_active_sparsity(model, key)
-        if recalibrate_loader is not None:
-            recalibrate_bn(model, recalibrate_loader, device)
+        restore_bn_stats(model, key)
         _debug_mask_state(model, f"evaluating key='{key}'")
         avg_loss, accuracy = vgg.evaluate(model, loader, device)
         results[key] = (avg_loss, accuracy)
         print(f"[EVAL] Sparsity '{key}': Avg Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2f}%")
     
     set_active_sparsity(model, original_active_key)
-    if recalibrate_loader is not None:
-        recalibrate_bn(model, recalibrate_loader, device)
+    restore_bn_stats(model, original_active_key)
     return results
 
 
@@ -362,6 +395,11 @@ def train(
                 frozen_params=freeze_params,
             )
             snapshot = snapshot_parameters(model)
+
+    #
+    # Save BN buffers for the active key
+    # 
+    save_active_bn_stats(model)
 
     #
     # Clean‑up
@@ -820,6 +858,7 @@ def save_checkpoint(
         'masks': {},
         'frozen_param_names': frozen_parameter_names(model),
         'element_freeze_masks': {},
+        'bn_buffers': {},
     }
 
     for mname, module in model.named_modules():
@@ -833,6 +872,13 @@ def save_checkpoint(
     for name, p in name_to_param.items():
         if p in _element_freeze_masks:
             checkpoint['element_freeze_masks'][name] = _element_freeze_masks[p].cpu()
+
+    # Persist per-key BN buffers (cpu)
+    for skey, mdict in _bn_buffers.items():
+        checkpoint['bn_buffers'][skey] = {
+            mname: {bk: bv.cpu() for bk, bv in bd.items()}
+            for mname, bd in mdict.items()
+        }
 
     if epoch is not None:
         checkpoint['epoch'] = epoch
@@ -894,6 +940,13 @@ def load_checkpoint(
         if name in name_to_param:
             _element_freeze_masks[name_to_param[name]] = mask.bool()
 
+    # Restore per-key BN buffers
+    _bn_buffers.clear()
+    for skey, mdict in checkpoint.get('bn_buffers', {}).items():
+        _bn_buffers[skey] = mdict  # kept on cpu; moved to active device at restore time
+    if _bn_buffers:
+        print(f"  Restored BN buffers for keys: {list(_bn_buffers.keys())}")
+
     print(f"[LOAD] Checkpoint loaded from {path}")
     saved_metrics = checkpoint.get('metrics', {})
     if 'eval' in saved_metrics:
@@ -936,76 +989,4 @@ class _TinyModel(nn.Module):
         return self.classifier(x)
 
 
-if __name__ == "__main__":
-    import warnings
-    warnings.filterwarnings("ignore", category=UserWarning, module=r"torchvision\.datasets\.cifar")
-
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    EPOCHS = 3
-    TRAIN_FREQ = 1
-
-    print("=" * 60)
-    print("TINY PIPELINE: TinyModel on CIFAR-10")
-    print(f"Device: {DEVICE}   Epochs per phase: {EPOCHS}")
-    print("=" * 60)
-
-    _, val_loader = vgg.create_dataloaders("./data", batch_size=64, num_workers=2)
-
-    # ---- Phase 1: Dense ----
-    print("\n" + "=" * 60)
-    print("PHASE 1: Dense training")
-    print("=" * 60)
-    model = _TinyModel()
-    snap1 = parameter_snapshot(model)
-    train(model=model, epochs=EPOCHS, N=0, M=0, verify_frequency=TRAIN_FREQ)
-    compare_snapshots(model, snap1, parameter_snapshot(model))
-
-    # ---- Phase 2: Sparse 1:4 ----
-    print("\n" + "=" * 60)
-    print("PHASE 2: Sparse 1:4 with pruned positions frozen")
-    print("=" * 60)
-    # Inject mask explicitly so freeze_inverse_mask can register element-freeze
-    # before the snapshot and training (train() will skip re-injection since masks exist)
-    inject_switchable_mask(model, "1:4", N=1, M=4, conv_axis="out", linear_orientation="row")
-    set_active_sparsity(model, "1:4")
-    freeze_inverse_mask(model, "1:4")
-    snap2 = parameter_snapshot(model)
-    train(model=model, epochs=EPOCHS, N=1, M=4, verify_frequency=TRAIN_FREQ)
-    compare_snapshots(model, snap2, parameter_snapshot(model), sparsity_key="1:4")
-    evaluate_all_sparsity_modes(model, val_loader, DEVICE)
-
-    # ---- Phase 3a: Freeze mask, train pruned in dense ----
-    print("\n" + "=" * 60)
-    print("PHASE 3a: Freeze kept positions, train pruned (dense)")
-    print("=" * 60)
-    freeze_mask(model, "1:4")
-    snap3a = parameter_snapshot(model)
-    train(model=model, epochs=EPOCHS, N=0, M=0, verify_frequency=TRAIN_FREQ)
-    compare_snapshots(model, snap3a, parameter_snapshot(model), sparsity_key="1:4")
-    evaluate_all_sparsity_modes(model, val_loader, DEVICE)
-
-    # ---- Phase 3b: Freeze mask + biases, train pruned in dense ----
-    print("\n" + "=" * 60)
-    print("PHASE 3b: Freeze kept + biases, train pruned (dense)")
-    print("=" * 60)
-    freeze_mask(model, "1:4")
-    freeze_biases(model)
-    snap3b = parameter_snapshot(model)
-    train(model=model, epochs=EPOCHS, N=0, M=0, verify_frequency=TRAIN_FREQ)
-    compare_snapshots(model, snap3b, parameter_snapshot(model), sparsity_key="1:4")
-    evaluate_all_sparsity_modes(model, val_loader, DEVICE)
-
-    # ---- Phase 3c: Freeze mask + everything else ----
-    print("\n" + "=" * 60)
-    print("PHASE 3c: Freeze kept + biases + BN + non-masked layers (dense)")
-    print("=" * 60)
-    freeze_mask(model, "1:4")
-    freeze_biases(model)
-    freeze_batchnorm(model)
-    freeze_non_masked_layers(model, "1:4")
-    snap3c = parameter_snapshot(model)
-    train(model=model, epochs=EPOCHS, N=0, M=0, verify_frequency=TRAIN_FREQ)
-    compare_snapshots(model, snap3c, parameter_snapshot(model), sparsity_key="1:4")
-    evaluate_all_sparsity_modes(model, val_loader, DEVICE)
-
-    print("\nDone.")
+# (no __main__ block; run main.py for the actual pipeline)

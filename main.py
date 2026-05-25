@@ -111,8 +111,7 @@ def _run_phase(
         freeze_params=freeze_params,
         **(train_kwargs or {}),
     )
-    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE,
-                                                   recalibrate_loader=train_loader)
+    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE)
     su.save_checkpoint(model, checkpoint_path, metrics={"eval": eval_results})
 
     snap_after = su.parameter_snapshot(model)
