@@ -1,6 +1,6 @@
 =======================================================
   OVERVIEW — VGG16 on CIFAR-10
-  Generated: 2026-05-15 11:53
+  Generated: 2026-05-24 16:08
 =======================================================
 
 ───────────────────────────────────────────────────────
@@ -9,14 +9,8 @@
   Checkpoint: ./runs/phase1_dense.pt
   Mask applied: None (dense)
   Frozen: None
-  Training config:
-    Epochs: 90
-    Optimizer: SGD (lr=0.1, momentum=0.9, weight_decay=5e-4)
-    LR schedule: CosineAnnealing (T_max=90)
-    Label smoothing: 0.1
-    Cutout: 16
   Results:
-    dense       loss=0.2776  acc=93.01%
+    dense       loss=0.2693  acc=93.72%
 
 ───────────────────────────────────────────────────────
   Phase 2 — Sparse 1:4 Training (pruned positions frozen)
@@ -24,15 +18,9 @@
   Checkpoint: ./runs/phase2_sparse.pt
   Mask applied: 1:4 (active during training)
   Frozen: Inverse mask (pruned / mask==0 positions)
-  Training config:
-    Epochs: 30
-    Optimizer: SGD (lr=0.1, momentum=0.9, weight_decay=5e-4)
-    LR schedule: StepLR (step_size=6, gamma=0.5)
-    Label smoothing: 0.0
-    Cutout: 0
   Results:
-    1:4         loss=0.2944  acc=92.29%
-    dense       loss=0.3333  acc=91.89%
+    1:4         loss=0.2889  acc=92.39%
+    dense       loss=11.3542  acc=20.07%
 
 ───────────────────────────────────────────────────────
   Phase 3a — Freeze mask, train pruned (dense)
@@ -40,15 +28,9 @@
   Checkpoint: ./runs/phase3a_freeze_mask.pt
   Mask applied: 1:4 (eval only; trained in dense mode)
   Frozen: Mask kept positions (mask==1)
-  Training config:
-    Epochs: 30
-    Optimizer: SGD (lr=0.1, momentum=0.9, weight_decay=5e-4)
-    LR schedule: StepLR (step_size=6, gamma=0.5)
-    Label smoothing: 0.0
-    Cutout: 0
   Results:
-    1:4         loss=0.3759  acc=88.92%
-    dense       loss=0.2898  acc=92.96%
+    1:4         loss=0.7386  acc=77.73%
+    dense       loss=0.2919  acc=92.89%
 
 ───────────────────────────────────────────────────────
   Phase 3b — Freeze mask + biases, train pruned (dense)
@@ -56,15 +38,9 @@
   Checkpoint: ./runs/phase3b_freeze_mask_biases.pt
   Mask applied: 1:4 (eval only; trained in dense mode)
   Frozen: Mask kept positions (mask==1) + all biases
-  Training config:
-    Epochs: 30
-    Optimizer: SGD (lr=0.1, momentum=0.9, weight_decay=5e-4)
-    LR schedule: StepLR (step_size=6, gamma=0.5)
-    Label smoothing: 0.0
-    Cutout: 0
   Results:
-    1:4         loss=0.4058  acc=88.70%
-    dense       loss=0.2951  acc=92.69%
+    1:4         loss=0.9570  acc=70.35%
+    dense       loss=0.3114  acc=92.91%
 
 ───────────────────────────────────────────────────────
   Phase 3c — Freeze mask + everything else, train pruned (dense)
@@ -72,12 +48,6 @@
   Checkpoint: ./runs/phase3c_freeze_everything_else.pt
   Mask applied: 1:4 (eval only; trained in dense mode)
   Frozen: Mask kept positions (mask==1) + biases + BN params + non-masked layers
-  Training config:
-    Epochs: 30
-    Optimizer: SGD (lr=0.1, momentum=0.9, weight_decay=5e-4)
-    LR schedule: StepLR (step_size=6, gamma=0.5)
-    Label smoothing: 0.0
-    Cutout: 0
   Results:
-    1:4         loss=0.2939  acc=92.20%
-    dense       loss=0.2975  acc=93.51%
+    1:4         loss=0.2889  acc=92.39%
+    dense       loss=0.3194  acc=93.13%
