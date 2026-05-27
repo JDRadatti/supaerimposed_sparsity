@@ -1,0 +1,69 @@
+=======================================================
+  OVERVIEW — PROGRESSIVE SPARSE TRAINING (NESTED MASKS)
+  Generated: 2026-05-26 16:12
+=======================================================
+
+───────────────────────────────────────────────────────
+  Stage 1 — Sparse 1:32 Training
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/progressive_stage1_1_32.pt
+  Mask applied: 1:32 (active during training)
+  Frozen: None
+  Results:
+    1:16        loss=0.6994  acc=77.25%
+    1:32        loss=0.4883  acc=85.33%
+    1:4         loss=2.1548  acc=48.71%
+    1:8         loss=1.6249  acc=56.85%
+    dense       loss=5.2542  acc=20.69%
+
+───────────────────────────────────────────────────────
+  Stage 2 — Freeze 1:32, train 1:16
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/progressive_stage2_1_16.pt
+  Note: 1:32 accuracy should match Stage 1
+  Mask applied: 1:16 (active during training)
+  Frozen: 1:32 positions (mask==1)
+  Results:
+    1:16        loss=0.4177  acc=87.90%
+    1:32        loss=0.5231  acc=84.43%
+    1:4         loss=2.1064  acc=30.68%
+    1:8         loss=2.0511  acc=30.43%
+    dense       loss=3.8554  acc=17.27%
+
+───────────────────────────────────────────────────────
+  Stage 3 — Freeze 1:32+1:16, train 1:8
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/progressive_stage3_1_8.pt
+  Note: 1:32 and 1:16 accuracy should match previous stages
+  Mask applied: 1:8 (active during training)
+  Frozen: 1:32 + 1:16 positions
+  Results:
+    1:16        loss=0.4542  acc=87.53%
+    1:32        loss=0.5682  acc=83.91%
+    1:4         loss=2.9858  acc=19.32%
+    1:8         loss=0.3725  acc=89.40%
+    dense       loss=9.4506  acc=12.64%
+
+───────────────────────────────────────────────────────
+  Stage 4 — Freeze 1:32+1:16+1:8, train 1:4
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/progressive_stage4_1_4.pt
+  Note: 1:32, 1:16, 1:8 accuracy should match previous stages
+  Mask applied: 1:4 (active during training)
+  Frozen: 1:32 + 1:16 + 1:8 positions
+  Results:
+    1:16        loss=0.5045  acc=87.19%
+    1:32        loss=0.6334  acc=83.10%
+    1:4         loss=0.3463  acc=90.61%
+    1:8         loss=0.4071  acc=89.39%
+    dense       loss=31.8300  acc=10.24%
+
+───────────────────────────────────────────────────────
+  FINAL EVALUATION (after Stage 4)
+───────────────────────────────────────────────────────
+  Results:
+    1:16        loss=0.5045  acc=87.19%
+    1:32        loss=0.6334  acc=83.10%
+    1:4         loss=0.3463  acc=90.61%
+    1:8         loss=0.4071  acc=89.39%
+    dense       loss=31.8300  acc=10.24%

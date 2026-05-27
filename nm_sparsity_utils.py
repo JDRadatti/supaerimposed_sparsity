@@ -945,6 +945,8 @@ def load_checkpoint(
         _bn_buffers[skey] = mdict  # kept on cpu; moved to active device at restore time
     if _bn_buffers:
         print(f"  Restored BN buffers for keys: {list(_bn_buffers.keys())}")
+    else:
+        print(f"  [BN] No BN buffers found in checkpoint")
 
     print(f"[LOAD] Checkpoint loaded from {path}")
     saved_metrics = checkpoint.get('metrics', {})
@@ -954,5 +956,3 @@ def load_checkpoint(
             print(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
     return checkpoint
 
-
-# (no __main__ block; run main.py for the actual pipeline)
