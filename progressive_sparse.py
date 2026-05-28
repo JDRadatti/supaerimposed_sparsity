@@ -197,6 +197,7 @@ def main() -> None:
     # 2. 1:32 sparse training
     #
     su.freeze_inverse_mask(model, "1:32")
+    #su.freeze_non_masked_layers(model, "1:32")
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
         name="Sparse 1:32 (pruned positions frozen)",
@@ -214,13 +215,14 @@ def main() -> None:
     #
     # Freeze everything except weights
     #
-    su.freeze_biases(model)
-    su.freeze_batchnorm(model)
 
     #
     # 1:16 sparse training
     #
     su.freeze_mask(model, "1:32")
+    su.freeze_non_masked_layers(model, "1:16")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
             name="freeze 1:32 mask + everything else, train 1:16",
@@ -238,8 +240,10 @@ def main() -> None:
     #
     # 1:8 sparse training
     #
-    su.freeze_mask(model, "1:32")
     su.freeze_mask(model, "1:16")
+    su.freeze_non_masked_layers(model, "1:8")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
             name="freeze 1:32 mask + everything else, train 1:8",
@@ -257,9 +261,10 @@ def main() -> None:
     #
     # 1:4 sparse training
     #
-    su.freeze_mask(model, "1:32")
-    su.freeze_mask(model, "1:16")
     su.freeze_mask(model, "1:8")
+    su.freeze_non_masked_layers(model, "1:4")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
             name="freeze 1:32 mask + everything else, train 1:4",
@@ -271,6 +276,25 @@ def main() -> None:
         snapshot_before=snap,
         epochs=30,
         N=1, M=4,
+        sparsity_key="1:4",
+    )
+
+    #
+    # Dense final training - train only pruned positions
+    #
+    su.freeze_mask(model, "1:4")
+    su.freeze_non_masked_layers(model, "dense")
+    snap = su.parameter_snapshot(model)
+    snap = _run_phase(
+        name="Phase 3c — freeze all masks + everything else, train dense (pruned positions)",
+        model=model,
+        val_loader=val_loader,
+        train_loader=train_loader,
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_dense_final.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_dense_final_comparison.txt",
+        snapshot_before=snap,
+        epochs=30,
+        N=0, M=0,
         sparsity_key="1:4",
     )
 
@@ -324,6 +348,15 @@ def main() -> None:
         frozen="1:32 + 1:16 + 1:8 masks + biases + BN + non-masked layers",
         eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_4.pt"),
         note="1:32, 1:16, 1:8 accuracy should match previous stages",
+    ))
+
+    overview.extend(_overview_section(
+        "Phase 3c — Dense Final (all masks frozen, train pruned positions)",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_dense_final.pt",
+        mask="None (dense mode - training unmasked weights)",
+        frozen="All mask kept positions (1:32, 1:16, 1:8, 1:4) + biases + BN + non-masked layers",
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_dense_final.pt"),
+        note="Only inverse-mask positions (pruned weights) are trained; all sparse eval accuracies should match previous stages",
     ))
 
     overview_path = f"{BASE_DIR}/overview.txt"

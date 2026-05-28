@@ -322,9 +322,11 @@ def train(
             linear_orientation="row"
         )
         set_active_sparsity(model, sparsity_key)
+        restore_bn_stats(model, sparsity_key)
         print(f"[TRAIN] Sparsity mode '{sparsity_key}' active.")
     else:
         set_active_sparsity(model, "dense")
+        restore_bn_stats(model, "dense")
         print("[TRAIN] Dense mode.")
 
     #
