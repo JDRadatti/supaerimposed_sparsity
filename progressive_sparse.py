@@ -282,7 +282,10 @@ def main() -> None:
     #
     # Dense final training - train only pruned positions
     #
+    su.load_checkpoint(model, f"{BASE_DIR}/progressive_sparse_1_4.pt")
     su.freeze_mask(model, "1:4")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
     su.freeze_non_masked_layers(model, "dense")
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
@@ -295,7 +298,7 @@ def main() -> None:
         snapshot_before=snap,
         epochs=30,
         N=0, M=0,
-        sparsity_key="1:4",
+        sparsity_key="dense",
     )
 
     # ------------------------------------------------------------------
