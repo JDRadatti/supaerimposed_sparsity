@@ -1,6 +1,6 @@
 =======================================================
-  OVERVIEW — VGG16 on CIFAR-10
-  Generated: 2026-05-24 16:08
+  OVERVIEW — PROGRESSIVE SPARSE TRAINING
+  Generated: 2026-05-28 11:42
 =======================================================
 
 ───────────────────────────────────────────────────────
@@ -10,44 +10,73 @@
   Mask applied: None (dense)
   Frozen: None
   Results:
-    dense       loss=0.2693  acc=93.72%
+    dense       loss=0.2680  acc=93.69%
 
 ───────────────────────────────────────────────────────
-  Phase 2 — Sparse 1:4 Training (pruned positions frozen)
+  Progressive 1:32 — Sparse 1:32 Training (pruned positions frozen)
 ───────────────────────────────────────────────────────
-  Checkpoint: ./runs/phase2_sparse.pt
-  Mask applied: 1:4 (active during training)
+  Checkpoint: ./runs/progressive_sparse_1_32.pt
+  Mask applied: 1:32 (active during training)
   Frozen: Inverse mask (pruned / mask==0 positions)
   Results:
-    1:4         loss=0.2889  acc=92.39%
-    dense       loss=11.3542  acc=20.07%
+    1:16        loss=2.2744  acc=50.50%
+    1:32        loss=0.3874  acc=87.48%
+    1:4         loss=7.7048  acc=9.48%
+    1:8         loss=6.2928  acc=19.27%
+    dense       loss=34.0736  acc=12.51%
 
 ───────────────────────────────────────────────────────
-  Phase 3a — Freeze mask, train pruned (dense)
+  Progressive 1:16 — Freeze 1:32 + everything else, train 1:16
 ───────────────────────────────────────────────────────
-  Checkpoint: ./runs/phase3a_freeze_mask.pt
-  Mask applied: 1:4 (eval only; trained in dense mode)
-  Frozen: Mask kept positions (mask==1)
+  Checkpoint: ./runs/progressive_sparse_1_16.pt
+  Note: 1:32 accuracy should match Progressive 1:32 stage
+  Mask applied: 1:16 (active during training)
+  Frozen: 1:32 mask + biases + BN + non-masked layers
   Results:
-    1:4         loss=0.7386  acc=77.73%
-    dense       loss=0.2919  acc=92.89%
+    1:16        loss=0.3407  acc=89.64%
+    1:32        loss=0.3874  acc=87.48%
+    1:4         loss=7.4054  acc=20.35%
+    1:8         loss=8.7056  acc=17.31%
+    dense       loss=33.8476  acc=15.50%
 
 ───────────────────────────────────────────────────────
-  Phase 3b — Freeze mask + biases, train pruned (dense)
+  Progressive 1:8 — Freeze 1:32+1:16 + everything else, train 1:8
 ───────────────────────────────────────────────────────
-  Checkpoint: ./runs/phase3b_freeze_mask_biases.pt
-  Mask applied: 1:4 (eval only; trained in dense mode)
-  Frozen: Mask kept positions (mask==1) + all biases
+  Checkpoint: ./runs/progressive_sparse_1_8.pt
+  Note: 1:32 and 1:16 accuracy should match previous stages
+  Mask applied: 1:8 (active during training)
+  Frozen: 1:32 + 1:16 masks + biases + BN + non-masked layers
   Results:
-    1:4         loss=0.9570  acc=70.35%
-    dense       loss=0.3114  acc=92.91%
+    1:16        loss=0.3407  acc=89.64%
+    1:32        loss=0.3874  acc=87.48%
+    1:4         loss=96.9305  acc=10.79%
+    1:8         loss=0.3520  acc=90.51%
+    dense       loss=211.1514  acc=11.11%
 
 ───────────────────────────────────────────────────────
-  Phase 3c — Freeze mask + everything else, train pruned (dense)
+  Progressive 1:4 — Freeze 1:32+1:16+1:8 + everything else, train 1:4
 ───────────────────────────────────────────────────────
-  Checkpoint: ./runs/phase3c_freeze_everything_else.pt
-  Mask applied: 1:4 (eval only; trained in dense mode)
-  Frozen: Mask kept positions (mask==1) + biases + BN params + non-masked layers
+  Checkpoint: ./runs/progressive_sparse_1_4.pt
+  Note: 1:32, 1:16, 1:8 accuracy should match previous stages
+  Mask applied: 1:4 (active during training)
+  Frozen: 1:32 + 1:16 + 1:8 masks + biases + BN + non-masked layers
   Results:
-    1:4         loss=0.2889  acc=92.39%
-    dense       loss=0.3194  acc=93.13%
+    1:16        loss=0.3407  acc=89.64%
+    1:32        loss=0.3874  acc=87.48%
+    1:4         loss=0.3473  acc=91.65%
+    1:8         loss=0.3520  acc=90.51%
+    dense       loss=1475.5555  acc=10.00%
+
+───────────────────────────────────────────────────────
+  Phase 3c — Dense Final (all masks frozen, train pruned positions)
+───────────────────────────────────────────────────────
+  Checkpoint: ./runs/progressive_sparse_dense_final.pt
+  Note: Only inverse-mask positions (pruned weights) are trained; all sparse eval accuracies should match previous stages
+  Mask applied: None (dense mode - training unmasked weights)
+  Frozen: All mask kept positions (1:32, 1:16, 1:8, 1:4) + biases + BN + non-masked layers
+  Results:
+    1:16        loss=0.3407  acc=89.64%
+    1:32        loss=0.3874  acc=87.48%
+    1:4         loss=0.3473  acc=91.65%
+    1:8         loss=0.3520  acc=90.51%
+    dense       loss=0.3292  acc=92.20%
