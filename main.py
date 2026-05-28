@@ -1,8 +1,8 @@
 """
-main.py
--------
-Runs a number of experiments on superimposed weights evaluated with different
-sparsities. 
+main.py - Progressive Sparse Training with Multiple Sparsity Modes
+
+Trains a model progressively with nested sparsity modes (1:32, 1:16, 1:8, 1:4),
+freezing previously-trained modes at each stage.
 """
 import contextlib
 import os
@@ -17,7 +17,7 @@ from vgg import (
     create_dataloaders,
     evaluate,
 )
-import nm_sparsity_utils as su
+import sparsity_modes as su
 
 # Silence the NumPy VisibleDeprecationWarning that CIFAR triggers
 import warnings
@@ -111,8 +111,7 @@ def _run_phase(
         freeze_params=freeze_params,
         **(train_kwargs or {}),
     )
-    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE,
-                                                   recalibrate_loader=train_loader)
+    eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE)
     su.save_checkpoint(model, checkpoint_path, metrics={"eval": eval_results})
 
     snap_after = su.parameter_snapshot(model)
@@ -166,8 +165,30 @@ def main() -> None:
     )
 
     #
-    # 2. Sparse Training
+    # 2. Inject all masks
     #
+    su.inject_switchable_mask(
+        model=model,
+        sparsity_key="1:32",
+        N=1, M=32,
+        conv_axis="out",
+        linear_orientation="row",
+    )
+
+    su.inject_switchable_mask(
+        model=model,
+        sparsity_key="1:16",
+        N=1, M=16,
+        conv_axis="out",
+        linear_orientation="row",
+    )
+    su.inject_switchable_mask(
+        model=model,
+        sparsity_key="1:8",
+        N=1, M=8,
+        conv_axis="out",
+        linear_orientation="row",
+    )
     su.inject_switchable_mask(
         model=model,
         sparsity_key="1:4",
@@ -175,84 +196,112 @@ def main() -> None:
         conv_axis="out",
         linear_orientation="row",
     )
-    su.freeze_inverse_mask(model, "1:4")
+    #
+    # 2. 1:32 sparse training
+    #
+    su.freeze_inverse_mask(model, "1:32")
+    #su.freeze_non_masked_layers(model, "1:32")
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
-        name="Sparse 1:4 (pruned positions frozen)",
+        name="Sparse 1:32 (pruned positions frozen)",
         model=model,
         val_loader=val_loader,
         train_loader=train_loader,
-        checkpoint_path=f"{BASE_DIR}/phase2_sparse.pt",
-        comparison_path=f"{BASE_DIR}/phase2_sparse_comparison.txt",
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_1_32.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_1_32_comparison.txt",
+        snapshot_before=snap,
+        epochs=30,
+        N=1, M=32,
+        sparsity_key="1:32",
+    )
+
+    #
+    # Freeze everything except weights
+    #
+
+    #
+    # 1:16 sparse training
+    #
+    su.freeze_mask(model, "1:32")
+    su.freeze_non_masked_layers(model, "1:16")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
+    snap = su.parameter_snapshot(model)
+    snap = _run_phase(
+            name="freeze 1:32 mask + everything else, train 1:16",
+        model=model,
+        val_loader=val_loader,
+        train_loader=train_loader,
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_1_16.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_1_16_comparison.txt",
+        snapshot_before=snap,
+        epochs=30,
+        N=1, M=16,
+        sparsity_key="1:16",
+    )
+
+    #
+    # 1:8 sparse training
+    #
+    su.freeze_mask(model, "1:16")
+    su.freeze_non_masked_layers(model, "1:8")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
+    snap = su.parameter_snapshot(model)
+    snap = _run_phase(
+            name="freeze 1:32 mask + everything else, train 1:8",
+        model=model,
+        val_loader=val_loader,
+        train_loader=train_loader,
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_1_8.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_1_8_comparison.txt",
+        snapshot_before=snap,
+        epochs=30,
+        N=1, M=8,
+        sparsity_key="1:8",
+    )
+
+    #
+    # 1:4 sparse training
+    #
+    su.freeze_mask(model, "1:8")
+    su.freeze_non_masked_layers(model, "1:4")
+    su.freeze_biases(model)
+    su.freeze_batchnorm(model)
+    snap = su.parameter_snapshot(model)
+    snap = _run_phase(
+            name="freeze 1:32 mask + everything else, train 1:4",
+        model=model,
+        val_loader=val_loader,
+        train_loader=train_loader,
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_1_4.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_1_4_comparison.txt",
         snapshot_before=snap,
         epochs=30,
         N=1, M=4,
         sparsity_key="1:4",
     )
 
-    # ------------------------------------------------------------------
-    # Phase 3 experiments — each starts fresh from Phase 2 checkpoint
-    # ------------------------------------------------------------------
-
     #
-    # 3a. Freeze only 1:4 mask values, train inverse mask
+    # Dense final training - train only pruned positions
     #
-    su.load_checkpoint(model, f"{BASE_DIR}/phase2_sparse.pt")
-    su.freeze_mask(model, "1:4")
-    snap = su.parameter_snapshot(model)
-    snap = _run_phase(
-        name="Phase 3a — freeze 1:4 mask, train pruned (dense)",
-        model=model,
-        val_loader=val_loader,
-        train_loader=train_loader,
-        checkpoint_path=f"{BASE_DIR}/phase3a_freeze_mask.pt",
-        comparison_path=f"{BASE_DIR}/phase3a_freeze_mask_comparison.txt",
-        snapshot_before=snap,
-        epochs=30,
-        N=0, M=0,
-        sparsity_key="1:4",
-    )
-
-    #
-    # 3b. Freeze mask + biases → train pruned (dense)
-    #
-    su.load_checkpoint(model, f"{BASE_DIR}/phase2_sparse.pt")
-    su.freeze_mask(model, "1:4")
-    su.freeze_biases(model)
-    snap = su.parameter_snapshot(model)
-    snap = _run_phase(
-        name="Phase 3b — freeze mask + biases, train pruned (dense)",
-        model=model,
-        val_loader=val_loader,
-        train_loader=train_loader,
-        checkpoint_path=f"{BASE_DIR}/phase3b_freeze_mask_biases.pt",
-        comparison_path=f"{BASE_DIR}/phase3b_freeze_mask_biases_comparison.txt",
-        snapshot_before=snap,
-        epochs=30,
-        N=0, M=0,
-        sparsity_key="1:4",
-    )
-
-    #
-    # 3c. Freeze mask + everything else (including batchnorm), train pruned (dense)
-    #
-    su.load_checkpoint(model, f"{BASE_DIR}/phase2_sparse.pt")
+    su.load_checkpoint(model, f"{BASE_DIR}/progressive_sparse_1_4.pt")
     su.freeze_mask(model, "1:4")
     su.freeze_biases(model)
     su.freeze_batchnorm(model)
-    su.freeze_non_masked_layers(model, "1:4")
+    su.freeze_non_masked_layers(model, "dense")
     snap = su.parameter_snapshot(model)
     snap = _run_phase(
-        name="Phase 3c — freeze mask + everything else, train pruned (dense)",
+        name="Phase 3c — freeze all masks + everything else, train dense (pruned positions)",
         model=model,
         val_loader=val_loader,
         train_loader=train_loader,
-        checkpoint_path=f"{BASE_DIR}/phase3c_freeze_everything_else.pt",
-        comparison_path=f"{BASE_DIR}/phase3c_freeze_everything_else_comparison.txt",
+        checkpoint_path=f"{BASE_DIR}/progressive_sparse_dense_final.pt",
+        comparison_path=f"{BASE_DIR}/progressive_sparse_dense_final_comparison.txt",
         snapshot_before=snap,
         epochs=30,
         N=0, M=0,
-        sparsity_key="1:4",
+        sparsity_key="dense",
     )
 
     # ------------------------------------------------------------------
@@ -260,7 +309,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     overview = []
     overview.append("=" * 55)
-    overview.append("  OVERVIEW — VGG16 on CIFAR-10")
+    overview.append("  OVERVIEW — PROGRESSIVE SPARSE TRAINING")
     overview.append(f"  Generated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}")
     overview.append("=" * 55)
 
@@ -273,35 +322,47 @@ def main() -> None:
     ))
 
     overview.extend(_overview_section(
-        "Phase 2 — Sparse 1:4 Training (pruned positions frozen)",
-        checkpoint=f"{BASE_DIR}/phase2_sparse.pt",
-        mask="1:4 (active during training)",
+        "Progressive 1:32 — Sparse 1:32 Training (pruned positions frozen)",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_1_32.pt",
+        mask="1:32 (active during training)",
         frozen="Inverse mask (pruned / mask==0 positions)",
-        eval_results=_read_eval(f"{BASE_DIR}/phase2_sparse.pt"),
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_32.pt"),
     ))
 
     overview.extend(_overview_section(
-        "Phase 3a — Freeze mask, train pruned (dense)",
-        checkpoint=f"{BASE_DIR}/phase3a_freeze_mask.pt",
-        mask="1:4 (eval only; trained in dense mode)",
-        frozen="Mask kept positions (mask==1)",
-        eval_results=_read_eval(f"{BASE_DIR}/phase3a_freeze_mask.pt"),
+        "Progressive 1:16 — Freeze 1:32 + everything else, train 1:16",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_1_16.pt",
+        mask="1:16 (active during training)",
+        frozen="1:32 mask + biases + BN + non-masked layers",
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_16.pt"),
+        note="1:32 accuracy should match Progressive 1:32 stage",
     ))
 
     overview.extend(_overview_section(
-        "Phase 3b — Freeze mask + biases, train pruned (dense)",
-        checkpoint=f"{BASE_DIR}/phase3b_freeze_mask_biases.pt",
-        mask="1:4 (eval only; trained in dense mode)",
-        frozen="Mask kept positions (mask==1) + all biases",
-        eval_results=_read_eval(f"{BASE_DIR}/phase3b_freeze_mask_biases.pt"),
+        "Progressive 1:8 — Freeze 1:32+1:16 + everything else, train 1:8",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_1_8.pt",
+        mask="1:8 (active during training)",
+        frozen="1:32 + 1:16 masks + biases + BN + non-masked layers",
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_8.pt"),
+        note="1:32 and 1:16 accuracy should match previous stages",
     ))
 
     overview.extend(_overview_section(
-        "Phase 3c — Freeze mask + everything else, train pruned (dense)",
-        checkpoint=f"{BASE_DIR}/phase3c_freeze_everything_else.pt",
-        mask="1:4 (eval only; trained in dense mode)",
-        frozen="Mask kept positions (mask==1) + biases + BN params + non-masked layers",
-        eval_results=_read_eval(f"{BASE_DIR}/phase3c_freeze_everything_else.pt"),
+        "Progressive 1:4 — Freeze 1:32+1:16+1:8 + everything else, train 1:4",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_1_4.pt",
+        mask="1:4 (active during training)",
+        frozen="1:32 + 1:16 + 1:8 masks + biases + BN + non-masked layers",
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_4.pt"),
+        note="1:32, 1:16, 1:8 accuracy should match previous stages",
+    ))
+
+    overview.extend(_overview_section(
+        "Phase 3c — Dense Final (all masks frozen, train pruned positions)",
+        checkpoint=f"{BASE_DIR}/progressive_sparse_dense_final.pt",
+        mask="None (dense mode - training unmasked weights)",
+        frozen="All mask kept positions (1:32, 1:16, 1:8, 1:4) + biases + BN + non-masked layers",
+        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_dense_final.pt"),
+        note="Only inverse-mask positions (pruned weights) are trained; all sparse eval accuracies should match previous stages",
     ))
 
     overview_path = f"{BASE_DIR}/overview.txt"
@@ -315,3 +376,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,5 +1,8 @@
 /__pycache__
-.DS_STORE
+sparsity_modes/__pycache__
+.DS_Store
+__MACOSX/
+/old
 /runs
 runs.zip
 /data
