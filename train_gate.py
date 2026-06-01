@@ -1,310 +1,122 @@
+#!/usr/bin/env python3
 """
-train_gate.py
--------------
-Cascade training of sparsity mode gating for VGG16.
+Train a binary gate to predict whether to use 1:32 or dense mode.
 
-The gate learns to predict confidence at each sparsity level:
-- Start at most sparse mode (1:32)
-- If gate confidence > threshold, accept and classify
-- Otherwise cascade to next less sparse mode
-
-Training: For each mode level, train gate to predict correctness
-  - At 1:32 level: target = (1:32 prediction == target)
-  - At 1:16 level: target = (1:16 prediction == target)
-  - etc.
+Pipeline:
+  1. Load the fully-trained progressive model (all masks + BN buffers).
+  2. Generate (feature, binary_label) data from 1:32 mode on the train set.
+  3. Train two gate architectures (linear, linear+hidden).
+  4. Evaluate gated inference on the test set.
 """
 import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim import lr_scheduler
-from torch.utils.data import DataLoader
+import warnings
 
-from vgg import build_model, create_dataloaders, evaluate
+import torch
+from torch.utils.data import DataLoader, random_split
+
+from vgg import evaluate as eval_model
+from vgg import build_model, create_dataloaders
 import sparsity_modes as su
-from gate import GatedVGG16, SparsityGate, create_gate_from_model, compute_gate_loss
+from gate import GateModel, generate_gate_data, train_gate, evaluate_gated, _quiet_restore_bn
+
+warnings.filterwarnings("ignore", category=UserWarning, module=r"torchvision\.datasets\.cifar")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BASE_DIR = "./runs/gate"
-os.makedirs(BASE_DIR, exist_ok=True)
+BASE_DIR = "./runs"
+CKPT_PATH = f"{BASE_DIR}/progressive_sparse_dense_final.pt"
 
 
-def get_registered_modes(model: nn.Module) -> list[str]:
-    """Get all registered sparsity modes from the model."""
-    modes = set()
-    for module in model.modules():
-        if isinstance(module, (nn.Conv2d, nn.Linear)) and hasattr(module, 'nm_masks'):
-            modes.update(module.nm_masks.keys())
-            break
-    
-    # Sort by sparsity (most sparse first: largest N:M ratio -> smallest)
-    def _sparsity_key(key: str) -> tuple[int, int]:
-        if key == 'dense':
-            return (0, 0)  # least sparse
-        parts = key.split(':')
-        return (int(parts[1]), int(parts[0]))  # sort by mask factor asc, then N asc
-    
-    modes = sorted(modes, key=_sparsity_key, reverse=True)
-    if 'dense' in modes:
-        modes.remove('dense')
-        modes.append('dense')  # Dense is least sparse, goes last
-    
-    return modes
+THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
 
 
-def evaluate_cascade(gated_model: GatedVGG16, loader: DataLoader, 
-                     mode_order: list[str], device: torch.device) -> tuple[float, float, dict, dict]:
-    """
-    Evaluate the gated model with cascade inference.
-    
-    Returns:
-        (loss, accuracy, mode_selection_counts, stats)
-    """
-    gated_model.eval()
-    gated_model.reset_stats()
-    
-    correct = 0
-    total = 0
-    loss_sum = 0
-    mode_counts = {key: 0 for key in mode_order}
-    confidence_sum = 0
-    
-    criterion = nn.CrossEntropyLoss()
-    
-    with torch.no_grad():
-        for images, targets in loader:
-            images, targets = images.to(device), targets.to(device)
-            
-            logits, selected_modes, confidences, stats = gated_model.cascade_forward(
-                images, mode_order, return_stats=True
-            )
-            loss = criterion(logits, targets)
-            
-            loss_sum += loss.item() * images.size(0)
-            correct += (logits.argmax(1) == targets).sum().item()
-            total += images.size(0)
-            
-            for mode in selected_modes:
-                mode_counts[mode] += 1
-            confidence_sum += stats['avg_confidence'] * images.size(0)
-    
-    stats = {
-        'avg_confidence': confidence_sum / total if total > 0 else 0,
-        'cascade_counts': stats['cascade_counts'],
-    }
-    
-    return loss_sum / total, 100.0 * correct / total, mode_counts, stats
-
-
-def train_cascade_gate(
-    base_model: nn.Module,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    mode_order: list[str],
-    epochs: int = 30,
-    gate_lr: float = 0.01,
-    checkpoint_path: str = None,
-    confidence_threshold: float = 0.5,
-    gate_position: int = 3,
-):
-    """
-    Train cascade gate with frozen base model.
-    
-    For each epoch, we train the gate at ALL cascade levels:
-    1. For each mode (from most sparse to least sparse):
-       - Set that mode active
-       - Compute features
-       - Train gate to predict correctness (binary classification)
-    
-    Args:
-        base_model: VGG16 model with sparsity masks registered (will be frozen)
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        mode_order: Modes from most sparse to least sparse (e.g., ['1:32', '1:16', '1:8', '1:4', 'dense'])
-        epochs: Total training epochs
-        gate_lr: Learning rate for gate
-        checkpoint_path: Path to save checkpoint
-        confidence_threshold: Threshold for cascade acceptance
-        gate_position: Which maxpool to place gate after (1, 2, or 3)
-    """
-    # Wrap model with gate
-    gated_model = GatedVGG16(
-        base_model, 
-        num_modes=len(mode_order),
-        confidence_threshold=confidence_threshold,
-        gate_position=gate_position,
-    )
-    gated_model.set_mode_registry(mode_order)
-    gated_model = gated_model.to(DEVICE)
-    
-    # Freeze all base model parameters
-    for param in base_model.parameters():
-        param.requires_grad = False
-    
-    # Optimize gate parameters
-    gate = gated_model.gate
-    gate_params = list(gate.parameters())
-    gate_optimizer = optim.SGD(gate_params, lr=gate_lr, momentum=0.9, weight_decay=5e-4)
-    gate_scheduler = lr_scheduler.CosineAnnealingLR(gate_optimizer, T_max=epochs)
-    
-    print(f"\n{'=' * 60}")
-    print(f"  CASCADE GATE TRAINING (model frozen)")
-    print(f"{'=' * 60}")
-    print(f"  Modes (cascade order): {mode_order}")
-    print(f"  Gate position: after maxpool {gate_position}")
-    print(f"  Epochs: {epochs}")
-    print(f"  Gate LR: {gate_lr}")
-    print(f"  Confidence threshold: {confidence_threshold}")
-    print(f"  Frozen params: {sum(p.numel() for p in base_model.parameters())}")
-    print(f"  Trainable params: {sum(p.numel() for p in gate.parameters())}")
-    print(f"{'=' * 60}\n")
-    
-    best_val_acc = 0.0
-    
-    for epoch in range(epochs):
-        gated_model.train()
-        
-        total_loss_sum = 0
-        total_samples = 0
-        train_modes = mode_order[:-1]  # exclude dense from training
-        level_losses = {mode: 0.0 for mode in train_modes}
-        level_counts = {mode: 0 for mode in train_modes}
-        
-        for images, targets in train_loader:
-            images, targets = images.to(DEVICE), targets.to(DEVICE)
-            batch_size = images.size(0)
-            
-            # Train gate at each cascade level (excluding dense — no cascade decision there)
-            epoch_loss = 0.0
-            
-            for mode_key in mode_order[:-1]:
-                # Set current sparsity mode
-                su.set_active_sparsity(base_model, mode_key)
-                su.restore_bn_stats(base_model, mode_key)
-                
-                # Compute features up to gate
-                with torch.no_grad():
-                    x_pre = gated_model.features_pre_gate(images)
-                
-                # Get gate output
-                gate_logits = gate(x_pre)
-                
-                # Compute correctness target for this mode
-                with torch.no_grad():
-                    # Full forward with current mode
-                    x_post = gated_model.features_post_gate(x_pre)
-                    x_post = gated_model.avgpool(x_post)
-                    x_post = torch.flatten(x_post, 1)
-                    logits = gated_model.classifier(x_post)
-                    correctness = (logits.argmax(1) == targets)
-                
-                # Compute loss
-                loss = compute_gate_loss(gate_logits, correctness)
-                epoch_loss += loss
-                
-                level_losses[mode_key] += loss.item() * batch_size
-                level_counts[mode_key] += batch_size
-            
-            # Backprop (sum of losses from all levels)
-            gate_optimizer.zero_grad()
-            epoch_loss.backward()
-            gate_optimizer.step()
-            
-            total_loss_sum += epoch_loss.item() * batch_size
-            total_samples += batch_size
-        
-        gate_scheduler.step()
-        
-        # Validation
-        val_loss, val_acc, mode_counts, eval_stats = evaluate_cascade(
-            gated_model, val_loader, mode_order, DEVICE
-        )
-        
-        # Print epoch stats
-        avg_loss = total_loss_sum / total_samples
-        print(f"Epoch {epoch+1}/{epochs}: "
-              f"Avg Loss {avg_loss:.4f} | "
-              f"Val Acc {val_acc:.2f}%")
-        print(f"  Level losses: " + " | ".join(
-            f"{m}: {level_losses[m]/level_counts[m]:.4f}" for m in train_modes
-        ))
-        
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            if checkpoint_path:
-                torch.save({
-                    'gate_state_dict': gate.state_dict(),
-                    'gated_model_state_dict': gated_model.state_dict(),
-                    'mode_order': mode_order,
-                    'epoch': epoch,
-                    'val_acc': val_acc,
-                    'confidence_threshold': confidence_threshold,
-                    'gate_position': gate_position,
-                }, checkpoint_path)
-                print(f"  [SAVE] Best checkpoint saved to {checkpoint_path}")
-    
-    print(f"\n  Best Val Acc: {best_val_acc:.2f}%")
-    
-    return gated_model, gate
+def print_threshold_table(name, all_results):
+    print(f"\n  {'=' * 68}")
+    print(f"  {name}")
+    print(f"  {'=' * 68}")
+    print(f"  {'thresh':>7} {'1:32->':>8} {'1:32 ok':>8} {'1:32%':>7} "
+          f"{'dense->':>8} {'dense ok':>8} {'dense%':>7} "
+          f"{'overall':>8}")
+    print(f"  {'─' * 68}")
+    for t, counts, correct, _ in all_results:
+        total = sum(counts.values())
+        overall = 100.0 * sum(correct.values()) / total
+        c32, cd = counts["1:32"], counts["dense"]
+        ok32, okd = correct["1:32"], correct["dense"]
+        p32 = 100.0 * ok32 / c32 if c32 else 0.0
+        pd = 100.0 * okd / cd if cd else 0.0
+        print(f"  {t:>7.2f} {c32:>8d} {ok32:>8d} {p32:>6.2f}% "
+              f"{cd:>8d} {okd:>8d} {pd:>6.2f}% {overall:>7.2f}%")
+    print(f"  {'─' * 68}")
+    print(f"  {'':>7} {'':>8} {'':>8} {'':>7} "
+          f"{'':>8} {'':>8} {'':>7} {'87.48%':>7}  (always 1:32)")
+    print(f"  {'':>7} {'':>8} {'':>8} {'':>7} "
+          f"{'':>8} {'':>8} {'':>7} {'92.20%':>7}  (always dense)")
 
 
 def main():
-    """Demo: Train cascade gate on pre-trained model with multiple sparsity modes."""
-    
-    # Load pre-trained model with all sparsity modes
-    print("\n[1] Loading pre-trained model with sparsity modes...")
-    
-    # Check if progressive sparse checkpoint exists
-    checkpoint_path = "./runs/progressive_sparse_dense_final.pt"
-    if not os.path.exists(checkpoint_path):
-        print(f"  [WARN] {checkpoint_path} not found.")
-        print("  Please run progressive_sparse.py first to create a model with all sparsity modes.")
-        return
-    
+    print("=" * 60)
+    print("  GATE TRAINING — Binary (1:32 vs dense)")
+    print("=" * 60)
+
+    # 1. Load model
+    print(f"\n[1] Loading model from {CKPT_PATH}...")
     model = build_model().to(DEVICE)
-    su.load_checkpoint(model, checkpoint_path)
-    
-    # Get registered modes (most sparse first, dense last)
-    mode_order = get_registered_modes(model)
-    print(f"  Registered modes: {mode_order}")
-    
-    # Create data loaders
+    su.load_checkpoint(model, CKPT_PATH)
+    su.unfreeze_all()
+    model.requires_grad_(False)
+    su.set_active_sparsity(model, "dense")
+    su.restore_bn_stats(model, "dense")
+
+    # Quick sanity eval
+    _, val_loader = create_dataloaders("./data", batch_size=128, num_workers=4)
+    su.set_active_sparsity(model, "1:32")
+    _quiet_restore_bn(model, "1:32")
+    loss_32, acc_32 = eval_model(model, val_loader, DEVICE)
+    su.set_active_sparsity(model, "dense")
+    _quiet_restore_bn(model, "dense")
+    loss_d, acc_d = eval_model(model, val_loader, DEVICE)
+    print(f"  Baseline — 1:32: {acc_32:.2f}%  |  dense: {acc_d:.2f}%")
+
+    # 2. Create data loaders
     print("\n[2] Creating data loaders...")
     train_loader, val_loader = create_dataloaders("./data", batch_size=128, num_workers=4)
-    
-    # Train cascade gate
-    print("\n[3] Training cascade gate...")
-    gated_model, trained_gate = train_cascade_gate(
-        base_model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        mode_order=mode_order,
-        epochs=20,
-        gate_lr=0.01,
-        checkpoint_path=f"{BASE_DIR}/gate_checkpoint.pt",
-        confidence_threshold=0.5,
-        gate_position=3,
-    )
-    
-    # Final evaluation
-    print("\n[4] Final evaluation...")
-    final_loss, final_acc, mode_counts, eval_stats = evaluate_cascade(
-        gated_model, val_loader, mode_order, DEVICE
-    )
-    
-    print(f"\n{'=' * 60}")
-    print(f"  FINAL RESULTS")
-    print(f"{'=' * 60}")
-    print(f"  Val Loss: {final_loss:.4f}")
-    print(f"  Val Accuracy: {final_acc:.2f}%")
-    print(f"  Avg confidence: {eval_stats['avg_confidence']:.3f}")
-    print(f"  Mode selection distribution:")
-    total = sum(mode_counts.values())
-    for mode in mode_order:
-        count = mode_counts.get(mode, 0)
-        pct = 100 * count / total if total > 0 else 0
-        print(f"    {mode}: {count} ({pct:.1f}%)")
-    print(f"{'=' * 60}\n")
+
+    # 3. Generate gate training data
+    print("\n[3] Generating gate training data...")
+    dataset = generate_gate_data(model, train_loader, DEVICE)
+    pos = dataset.tensors[1].sum().item()
+    neg = len(dataset) - pos
+    print(f"  Samples: {len(dataset)}  (1:32 correct: {int(pos)} / {100*pos/len(dataset):.1f}%"
+          f"  |  1:32 wrong: {int(neg)} / {100*neg/len(dataset):.1f}%)")
+
+    # 4. Split into train / val
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    gate_train_loader = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=2)
+    gate_val_loader = DataLoader(val_ds, batch_size=128, num_workers=2)
+
+    # 5. GateA — Linear(16384 -> 1)
+    print(f"\n[4] GateA — Linear (MaxPool2d → Flatten → Linear)")
+    print(f"  Params: {sum(p.numel() for p in GateModel(0).parameters())}")
+    gate_a = GateModel(hidden_dim=0)
+    gate_a = train_gate(gate_a, gate_train_loader, gate_val_loader, DEVICE)
+    results_a = []
+    for t in THRESHOLDS:
+        r = evaluate_gated(model, gate_a, val_loader, DEVICE, threshold=t)
+        results_a.append((t, *r))
+    print_threshold_table("GateA (MaxPool → Linear)", results_a)
+
+    # 6. GateB — Linear(16384 -> 64 -> ReLU -> 1)
+    print(f"\n[5] GateB — Linear (MaxPool2d → Flatten → Linear 64 → ReLU → Linear 1)")
+    print(f"  Params: {sum(p.numel() for p in GateModel(64).parameters())}")
+    gate_b = GateModel(hidden_dim=64)
+    gate_b = train_gate(gate_b, gate_train_loader, gate_val_loader, DEVICE)
+    results_b = []
+    for t in THRESHOLDS:
+        r = evaluate_gated(model, gate_b, val_loader, DEVICE, threshold=t)
+        results_b.append((t, *r))
+    print_threshold_table("GateB (MaxPool → Linear 64 → ReLU → Linear 1)", results_b)
 
 
 if __name__ == "__main__":
