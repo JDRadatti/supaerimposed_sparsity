@@ -40,8 +40,8 @@ def generate_gate_data(model, loader, device):
     """Generate (features, binary_label) dataset for gate training.
 
     Features are extracted from the output of the first conv+bn+relu
-    (never masked), then 2x maxpooled to [B, 64, 16, 16] then flattened
-    to [B, 16384].
+    (never masked), stored as [B, 64, 32, 32]. The gate's own
+    MaxPool2d and flatten handle the rest.
 
     Labels are 1 if 1:32 top-1 matches ground truth, 0 otherwise.
     """
@@ -55,7 +55,6 @@ def generate_gate_data(model, loader, device):
         images, targets = images.to(device), targets.to(device)
 
         feat = model.features[:3](images)
-        feat = F.max_pool2d(feat, 2).flatten(1)
 
         outputs = model(images)
         labels = (outputs.argmax(1) == targets).float()
@@ -80,7 +79,7 @@ def train_gate(gate, train_loader, val_loader, device, epochs=20, lr=1e-3):
         for features, labels in train_loader:
             features, labels = features.to(device), labels.to(device)
             optimizer.zero_grad()
-            logits = gate(features.view(-1, 64, 16, 16)).squeeze(-1)
+            logits = gate(features).squeeze(-1)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
@@ -108,7 +107,7 @@ def _eval_gate(gate, loader, device, criterion=None):
     with torch.no_grad():
         for features, labels in loader:
             features, labels = features.to(device), labels.to(device)
-            logits = gate(features.view(-1, 64, 16, 16)).squeeze(-1)
+            logits = gate(features).squeeze(-1)
             if criterion is not None:
                 total_loss += criterion(logits, labels).item() * features.size(0)
             preds = (torch.sigmoid(logits) >= 0.5).float()
