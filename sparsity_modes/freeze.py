@@ -5,6 +5,8 @@ Handles freezing individual parameters and element-wise positions.
 import torch
 import torch.nn as nn
 
+from .logger import debug
+
 
 # Module-level state for frozen params
 _frozen_params: set[torch.nn.Parameter] = set()
@@ -66,7 +68,7 @@ def clear_all_frozen():
             delattr(p, "_frozen")
     _frozen_params.clear()
     _element_freeze_masks.clear()
-    print("[FREEZE] All frozen flags cleared.")
+    debug("[FREEZE] All frozen flags cleared.")
 
 
 def zero_frozen_gradients(optimizer):
@@ -134,7 +136,7 @@ def freeze_biases(model: torch.nn.Module):
         if hasattr(module, 'bias') and module.bias is not None:
             register_frozen_param(module.bias)
             count += 1
-    print(f"[FREEZE] {count} bias parameters frozen.")
+    debug(f"[FREEZE] {count} bias parameters frozen.")
 
 
 def freeze_mask(model: torch.nn.Module, sparsity_key: str):
@@ -154,7 +156,7 @@ def freeze_mask(model: torch.nn.Module, sparsity_key: str):
             continue
         register_element_freeze(module.weight, mask.bool())
         count += 1
-    print(f"[FREEZE] {count} modules mask '{sparsity_key}' frozen.")
+    debug(f"[FREEZE] {count} modules mask '{sparsity_key}' frozen.")
 
 
 def freeze_inverse_mask(model: torch.nn.Module, sparsity_key: str):
@@ -174,7 +176,7 @@ def freeze_inverse_mask(model: torch.nn.Module, sparsity_key: str):
             continue
         register_element_freeze(module.weight, mask.eq(0))
         count += 1
-    print(f"[FREEZE] {count} modules inverse mask '{sparsity_key}' frozen.")
+    debug(f"[FREEZE] {count} modules inverse mask '{sparsity_key}' frozen.")
 
 
 def freeze_batchnorm(model: torch.nn.Module):
@@ -188,13 +190,13 @@ def freeze_batchnorm(model: torch.nn.Module):
             if module.bias is not None:
                 register_frozen_param(module.bias)
                 count += 1
-    print(f"[FREEZE] {count} BatchNorm parameters frozen.")
+    debug(f"[FREEZE] {count} BatchNorm parameters frozen.")
 
 
 def unfreeze_all():
     """Unfreeze everything: clear all frozen params and element-level freeze masks."""
     clear_all_frozen()
-    print("[FREEZE] All parameters unfrozen.")
+    debug("[FREEZE] All parameters unfrozen.")
 
 
 def freeze_non_masked_layers(model: nn.Module, sparsity_key: str):
@@ -208,7 +210,7 @@ def freeze_non_masked_layers(model: nn.Module, sparsity_key: str):
         if module.weight is not None:
             register_frozen_param(module.weight)
             count += 1
-    print(f"[FREEZE] {count} non-masked layers frozen.")
+    debug(f"[FREEZE] {count} non-masked layers frozen.")
 
 
 def freeze_all(model: nn.Module):
@@ -221,4 +223,4 @@ def freeze_all(model: nn.Module):
     for p in model.parameters():
         register_frozen_param(p)
         count += 1
-    print(f"[FREEZE] All {count} parameters frozen.")
+    debug(f"[FREEZE] All {count} parameters frozen.")

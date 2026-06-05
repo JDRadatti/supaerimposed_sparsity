@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ._sparse import _nm_mask_conv2d_axis, _nm_mask_linear
+from .logger import debug, warning
 
 
 def inject_switchable_mask(
@@ -85,7 +86,7 @@ def _patch_forward_for_masks(module: nn.Module) -> None:
 
             mask = m.nm_masks.get(current_mask_key)
             if mask is None:
-                print(f"Warning: Mask '{current_mask_key}' not found for module. Falling back to dense.")
+                warning(f"Mask '{current_mask_key}' not found for module. Falling back to dense.")
                 return m._original_forward(input)
 
             masked_weight = m.weight * mask.to(m.weight.device)
@@ -133,7 +134,7 @@ def get_active_sparsity(model: nn.Module) -> str:
 
 def _debug_mask_state(model: nn.Module, tag: str = "") -> None:
     """Print the active mask key and patch state of every module with nm_masks."""
-    print(f"\n[DEBUG MASK STATE{(' ' + tag) if tag else ''}]")
+    debug(f"\n[DEBUG MASK STATE{(' ' + tag) if tag else ''}]")
     total_conv_linear = sum(
         1 for m in model.modules()
         if isinstance(m, (nn.Conv2d, nn.Linear)) and hasattr(m, 'weight')
@@ -147,5 +148,5 @@ def _debug_mask_state(model: nn.Module, tag: str = "") -> None:
         active = getattr(module, 'active_mask_key', 'N/A')
         is_patched = (hasattr(module, '_original_forward') and
                       module.forward is not module._original_forward)
-        print(f"  {name}: keys={keys} active={active} patched={is_patched}")
-    print(f"  [{total_masked}/{total_conv_linear} Conv/Linear layers have nm_masks]")
+        debug(f"  {name}: keys={keys} active={active} patched={is_patched}")
+    debug(f"  [{total_masked}/{total_conv_linear} Conv/Linear layers have nm_masks]")

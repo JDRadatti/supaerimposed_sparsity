@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .masks import get_active_sparsity
+from .logger import debug
 
 
 # Module-level state for BN buffers
@@ -45,13 +46,13 @@ def save_active_bn_stats(model: nn.Module) -> None:
     key = get_active_sparsity(model)
     _bn_buffers[key] = _collect_bn_stats(model)
     n = len(_bn_buffers[key])
-    print(f"[BN] Saved BN buffers for key '{key}' ({n} BN layers).")
+    debug(f"[BN] Saved BN buffers for key '{key}' ({n} BN layers).")
 
 
 def restore_bn_stats(model: nn.Module, sparsity_key: str) -> None:
     """Restore BN buffers for *sparsity_key*.  No‑op if no buffers have been saved."""
     if sparsity_key in _bn_buffers:
         _apply_bn_stats(model, _bn_buffers[sparsity_key])
-        print(f"[BN] Restored BN buffers for key '{sparsity_key}'.")
+        debug(f"[BN] Restored BN buffers for key '{sparsity_key}'.")
     else:
-        print(f"[BN] No saved BN buffers for key '{sparsity_key}', using current.")
+        debug(f"[BN] No saved BN buffers for key '{sparsity_key}', using current.")

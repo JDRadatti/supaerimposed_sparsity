@@ -4,8 +4,10 @@ main.py - Progressive Sparse Training with Multiple Sparsity Modes
 Trains a model progressively with nested sparsity modes (1:32, 1:16, 1:8, 1:4),
 freezing previously-trained modes at each stage.
 """
+import argparse
 import contextlib
 import os
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -18,6 +20,14 @@ from vgg import (
     evaluate,
 )
 import sparsity_modes as su
+from sparsity_modes.logger import (
+    setup_logger,
+    info,
+    debug,
+    banner,
+    frozen_summary,
+    sparsity_summary,
+)
 
 # Silence the NumPy VisibleDeprecationWarning that CIFAR triggers
 import warnings
@@ -27,44 +37,10 @@ warnings.filterwarnings(
     module=r"torchvision\.datasets\.cifar",
 )
 
-EPOCHS   = 90
+EPOCHS   = 200
 DEVICE   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = "./runs"
 os.makedirs(BASE_DIR, exist_ok=True)
-
-
-def _read_eval(checkpoint_path: str) -> dict | None:
-    if not os.path.exists(checkpoint_path):
-        return None
-    ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
-    return ckpt.get("metrics", {}).get("eval", None)
-
-
-def _format_eval_line(key: str, loss: float, acc: float) -> str:
-    return f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%"
-
-
-def _overview_section(
-    title: str,
-    checkpoint: str,
-    frozen: str,
-    mask: str,
-    eval_results: dict | None = None,
-    note: str = "",
-) -> list[str]:
-    lines = [f"\n{'─' * 55}", f"  {title}", f"{'─' * 55}"]
-    lines.append(f"  Checkpoint: {checkpoint}")
-    if note:
-        lines.append(f"  Note: {note}")
-    lines.append(f"  Mask applied: {mask}")
-    lines.append(f"  Frozen: {frozen}")
-    if eval_results:
-        lines.append("  Results:")
-        for key, (loss, acc) in sorted(eval_results.items()):
-            lines.append(_format_eval_line(key, loss, acc))
-    else:
-        lines.append("  Results: (checkpoint not found)")
-    return lines
 
 
 def _run_phase(
@@ -91,15 +67,19 @@ def _run_phase(
 
     Returns the post-training (or post-load) snapshot.
     """
-    header = f"  Phase: {name}  |  epochs={epochs}  |  N={N}  M={M}"
-    print(f"\n{'=' * 60}")
-    print(f"  {header}")
+    banner(f"  {name}")
+    info(f"  Epochs:   {epochs}")
+    info(f"  Mode:     {sparsity_key or 'dense'}")
     if sparsity_key:
-        print(f"  mask: {sparsity_key}")
-    print(f"{'=' * 60}")
+        summary = sparsity_summary(model)
+        if sparsity_key in summary:
+            info(f"  Sparsity: {summary[sparsity_key]}")
+    info("  Frozen:")
+    for line in frozen_summary(model):
+        info(f"    {line}")
 
     if skip_if_exists and os.path.exists(checkpoint_path):
-        print(f"  [CACHED] Checkpoint exists, loading and skipping training.")
+        debug(f"  [CACHED] Checkpoint exists, loading and skipping training.")
         su.load_checkpoint(model, checkpoint_path)
         return su.parameter_snapshot(model)
 
@@ -113,6 +93,10 @@ def _run_phase(
     )
     eval_results = su.evaluate_all_sparsity_modes(model, val_loader, DEVICE)
     su.save_checkpoint(model, checkpoint_path, metrics={"eval": eval_results})
+
+    info("Eval Results:")
+    for key, (loss, acc) in sorted(eval_results.items()):
+        info(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
 
     snap_after = su.parameter_snapshot(model)
     if snapshot_before is not None:
@@ -130,11 +114,20 @@ def _run_phase(
                     sparsity_key=sparsity_key,
                     line_cap=50,
                 )
-        print(f"  [COMPARISON] saved to {comparison_path}")
+        debug(f"  [COMPARISON] saved to {comparison_path}")
+
+    info("-" * 58)
     return snap_after
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Progressive sparse training")
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose output")
+    parser.add_argument("--log-file", default=None, help="log file path")
+    args = parser.parse_args()
+
+    log_file = args.log_file or f"{BASE_DIR}/main_{datetime.now():%Y%m%d_%H%M%S}.log"
+    setup_logger(verbose=args.verbose, log_file=log_file)
 
     #
     # 0. Init
@@ -304,76 +297,6 @@ def main() -> None:
         sparsity_key="dense",
     )
 
-    # ------------------------------------------------------------------
-    # Write overview.txt
-    # ------------------------------------------------------------------
-    overview = []
-    overview.append("=" * 55)
-    overview.append("  OVERVIEW — PROGRESSIVE SPARSE TRAINING")
-    overview.append(f"  Generated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    overview.append("=" * 55)
-
-    overview.extend(_overview_section(
-        "Phase 1 — Initial Dense Training",
-        checkpoint=f"{BASE_DIR}/phase1_dense.pt",
-        mask="None (dense)",
-        frozen="None",
-        eval_results=_read_eval(f"{BASE_DIR}/phase1_dense.pt"),
-    ))
-
-    overview.extend(_overview_section(
-        "Progressive 1:32 — Sparse 1:32 Training (pruned positions frozen)",
-        checkpoint=f"{BASE_DIR}/progressive_sparse_1_32.pt",
-        mask="1:32 (active during training)",
-        frozen="Inverse mask (pruned / mask==0 positions)",
-        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_32.pt"),
-    ))
-
-    overview.extend(_overview_section(
-        "Progressive 1:16 — Freeze 1:32 + everything else, train 1:16",
-        checkpoint=f"{BASE_DIR}/progressive_sparse_1_16.pt",
-        mask="1:16 (active during training)",
-        frozen="1:32 mask + biases + BN + non-masked layers",
-        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_16.pt"),
-        note="1:32 accuracy should match Progressive 1:32 stage",
-    ))
-
-    overview.extend(_overview_section(
-        "Progressive 1:8 — Freeze 1:32+1:16 + everything else, train 1:8",
-        checkpoint=f"{BASE_DIR}/progressive_sparse_1_8.pt",
-        mask="1:8 (active during training)",
-        frozen="1:32 + 1:16 masks + biases + BN + non-masked layers",
-        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_8.pt"),
-        note="1:32 and 1:16 accuracy should match previous stages",
-    ))
-
-    overview.extend(_overview_section(
-        "Progressive 1:4 — Freeze 1:32+1:16+1:8 + everything else, train 1:4",
-        checkpoint=f"{BASE_DIR}/progressive_sparse_1_4.pt",
-        mask="1:4 (active during training)",
-        frozen="1:32 + 1:16 + 1:8 masks + biases + BN + non-masked layers",
-        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_1_4.pt"),
-        note="1:32, 1:16, 1:8 accuracy should match previous stages",
-    ))
-
-    overview.extend(_overview_section(
-        "Phase 3c — Dense Final (all masks frozen, train pruned positions)",
-        checkpoint=f"{BASE_DIR}/progressive_sparse_dense_final.pt",
-        mask="None (dense mode - training unmasked weights)",
-        frozen="All mask kept positions (1:32, 1:16, 1:8, 1:4) + biases + BN + non-masked layers",
-        eval_results=_read_eval(f"{BASE_DIR}/progressive_sparse_dense_final.pt"),
-        note="Only inverse-mask positions (pruned weights) are trained; all sparse eval accuracies should match previous stages",
-    ))
-
-    overview_path = f"{BASE_DIR}/overview.txt"
-    with open(overview_path, "w") as f:
-        f.write("\n".join(overview))
-        f.write("\n")
-    print(f"\n[OVERVIEW] saved to {overview_path}")
-    for line in overview:
-        print(line)
-
 
 if __name__ == "__main__":
     main()
-

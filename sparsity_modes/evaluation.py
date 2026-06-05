@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 import vgg
 from .masks import set_active_sparsity, get_active_sparsity, _debug_mask_state
 from .bn_buffers import restore_bn_stats
+from .logger import debug
 
 
 def evaluate_all_sparsity_modes(
@@ -50,7 +51,7 @@ def evaluate_all_sparsity_modes(
         _debug_mask_state(model, f"evaluating key='{key}'")
         avg_loss, accuracy = vgg.evaluate(model, loader, device)
         results[key] = (avg_loss, accuracy)
-        print(f"[EVAL] Sparsity '{key}': Avg Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2f}%")
+        debug(f"[EVAL] Sparsity '{key}': Avg Loss = {avg_loss:.4f}, Accuracy = {accuracy:.2f}%")
     
     set_active_sparsity(model, original_active_key)
     restore_bn_stats(model, original_active_key)

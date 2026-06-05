@@ -23,6 +23,7 @@ from .freeze import (
 from .bn_buffers import save_active_bn_stats, restore_bn_stats
 from .evaluation import evaluate_all_sparsity_modes
 from .validation import snapshot_parameters, verify_after_training
+from .logger import debug
 
 
 def train(
@@ -58,11 +59,11 @@ def train(
         )
         set_active_sparsity(model, sparsity_key)
         restore_bn_stats(model, sparsity_key)
-        print(f"[TRAIN] Sparsity mode '{sparsity_key}' active.")
+        debug(f"[TRAIN] Sparsity mode '{sparsity_key}' active.")
     else:
         set_active_sparsity(model, "dense")
         restore_bn_stats(model, "dense")
-        print("[TRAIN] Dense mode.")
+        debug("[TRAIN] Dense mode.")
 
     #
     # Freeze registration
@@ -70,9 +71,9 @@ def train(
     if freeze_params:
         for p in freeze_params:
             register_frozen_param(p)
-        print(f"[TRAIN] {len(freeze_params)} parameters frozen.")
+        debug(f"[TRAIN] {len(freeze_params)} parameters frozen.")
     else:
-        print("[TRAIN] No frozen parameters.")
+        debug("[TRAIN] No frozen parameters.")
 
     #
     # Optimizer / scheduler / dataloader
@@ -116,9 +117,7 @@ def train(
         scheduler.step()
 
         val_loss, val_acc = vgg.evaluate(model, val_loader, device)
-        print(f"Epoch {epoch+1}: "
-              f"Train Acc {100*correct/total:.2f}% | "
-              f"Val Acc {val_acc:.2f}%")
+        debug(f"Epoch {epoch+1}: Train Acc {100*correct/total:.2f}% | Val Acc {val_acc:.2f}%")
 
         # 
         # Verify snapshot

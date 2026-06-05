@@ -5,6 +5,8 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+from sparsity_modes.logger import debug
+
 
 
 _CFG_VGG16 = [
@@ -187,6 +189,4 @@ def train(model, epochs=20):
 
         val_loss, val_acc = evaluate(model, val_loader, device)
 
-        print(f"Epoch {epoch+1}: "
-              f"Train Acc {100*correct/total:.2f}% | "
-              f"Val Acc {val_acc:.2f}%")
+        debug(f"Epoch {epoch+1}: Train Acc {100*correct/total:.2f}% | Val Acc {val_acc:.2f}%")
