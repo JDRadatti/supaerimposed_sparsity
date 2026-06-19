@@ -1,0 +1,47 @@
+Parameter comparison (before -> after fine-tuning):
+
+  features.0.weight  (1728 elem)  changed=1728/1728
+  features.1.weight  (64 elem)  changed=64/64
+  features.1.bias  (64 elem)  changed=64/64
+  features.3.weight_orig  (36864 elem)  changed=36862/36864
+  features.4.weight  (64 elem)  changed=64/64
+  features.4.bias  (64 elem)  changed=64/64
+  features.7.weight_orig  (73728 elem)  changed=73728/73728
+  features.8.weight  (128 elem)  changed=128/128
+  features.8.bias  (128 elem)  changed=128/128
+  features.10.weight_orig  (147456 elem)  changed=147456/147456
+  features.11.weight  (128 elem)  changed=128/128
+  features.11.bias  (128 elem)  changed=128/128
+  features.14.weight_orig  (294912 elem)  changed=294911/294912
+  features.15.weight  (256 elem)  changed=256/256
+  features.15.bias  (256 elem)  changed=256/256
+  features.17.weight_orig  (589824 elem)  changed=589823/589824
+  features.18.weight  (256 elem)  changed=255/256
+  features.18.bias  (256 elem)  changed=256/256
+  features.20.weight_orig  (589824 elem)  changed=589822/589824
+  features.21.weight  (256 elem)  changed=256/256
+  features.21.bias  (256 elem)  changed=256/256
+  features.24.weight_orig  (1179648 elem)  changed=1179644/1179648
+  features.25.weight  (512 elem)  changed=512/512
+  features.25.bias  (512 elem)  changed=512/512
+  features.27.weight_orig  (2359296 elem)  changed=2359265/2359296
+  features.28.weight  (512 elem)  changed=512/512
+  features.28.bias  (512 elem)  changed=512/512
+  features.30.weight_orig  (2359296 elem)  changed=2359241/2359296
+  features.31.weight  (512 elem)  changed=512/512
+  features.31.bias  (512 elem)  changed=512/512
+  features.34.weight_orig  (2359296 elem)  changed=2359231/2359296
+  features.35.weight  (512 elem)  changed=512/512
+  features.35.bias  (512 elem)  changed=512/512
+  features.37.weight_orig  (2359296 elem)  changed=2359225/2359296
+  features.38.weight  (512 elem)  changed=512/512
+  features.38.bias  (512 elem)  changed=512/512
+  features.40.weight_orig  (2359296 elem)  changed=2359184/2359296
+  features.41.weight  (512 elem)  changed=512/512
+  features.41.bias  (512 elem)  changed=512/512
+  classifier.0.bias  (512 elem)  changed=511/512
+  classifier.0.weight_orig  (262144 elem)  changed=258902/262144
+  classifier.3.weight  (5120 elem)  changed=5094/5120
+  classifier.3.bias  (10 elem)  changed=10/10
+
+  Total: 14983084/14986698 parameters changed
