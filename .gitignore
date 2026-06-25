@@ -3,8 +3,9 @@ sparsity_modes/__pycache__
 .DS_Store
 __MACOSX/
 /old
-/runs
+/runs*
 runs.zip
 /data
 data.zip
 /.venv
+*.pt
