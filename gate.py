@@ -30,8 +30,8 @@ log = logging.getLogger(__name__)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = "./runs_gate"
-DENSE_CKPT = "./baseline/dense.pt"
-SPARSE_CKPT = "./baseline/sparse_1_32.pt"
+DENSE_CKPT = "./runs_baseline/dense.pt"
+SPARSE_CKPT = "./runs_baseline/sparse_1_32.pt"
 GATE_INPUT_DIM = 2048
 GATE_HIDDEN_DIM = 256
 GATE_EPOCHS = 20
