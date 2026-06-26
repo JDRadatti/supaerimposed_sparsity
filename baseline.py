@@ -70,8 +70,14 @@ def _write_comparison(path, before, after):
 
 
 def train_model(model, epochs, lr=0.1, label_smoothing=0.0, cutout=0,
-                scheduler_fn=None):
+                scheduler_fn=None, freeze_conv1=False):
     """Train model with standard SGD loop."""
+    if freeze_conv1:
+        for i, child in enumerate(model.features):
+            if i >= 7:
+                break
+            for p in child.parameters():
+                p.requires_grad = False
     model = model.to(DEVICE)
     train_loader, val_loader = create_dataloaders("./data", 128, 4, cutout=cutout)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
@@ -153,6 +159,7 @@ def main():
         train_model(
             model_sparse, SPARSE_EPOCHS, lr=0.01,
             scheduler_fn=lambda opt: lr_scheduler.CosineAnnealingLR(opt, T_max=SPARSE_EPOCHS),
+            freeze_conv1=True,
         )
         snap_after = _snapshot_params(model_sparse)
         _write_comparison(f"{BASE_DIR}/sparse_1_32_comparison.txt", snap_after_prune, snap_after)

@@ -46,12 +46,21 @@ def flops_aware_loss(logits, labels, lambda_flops=0.1):
     return {"loss": loss, "bce": bce.item(), "aux": p_dense.item()}
 
 
+def focal_loss(logits, labels, gamma=2.0, alpha=0.75):
+    bce = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+    pt = torch.exp(-bce)
+    alpha_t = alpha * labels + (1 - alpha) * (1 - labels)
+    focal = (alpha_t * pt.pow(gamma) * bce).mean()
+    return {"loss": focal, "bce": bce.mean().item(), "aux": 0.0}
+
+
 _LOSS_REGISTRY = {
     "baseline": baseline_loss,
     "entropy_regularized": entropy_regularized_loss,
     "accuracy_weighted": accuracy_weighted_loss,
     "confidence_calibrated": confidence_calibrated_loss,
     "flops_aware": flops_aware_loss,
+    "focal": focal_loss,
 }
 
 

@@ -6,8 +6,9 @@ Uses baseline dense + sparse models to generate labels:
   Label 1 (needs dense): dense correct AND sparse incorrect
   Label 0 (sparse OK):  everything else
 
-Gate input: 2048-dim feature vector from dense model (pre-avgpool, 512x2x2 flattened).
-Gate: Linear(2048,256) -> ReLU -> Linear(256,1) trained with BCEWithLogitsLoss.
+Gate is a CNN trained directly on raw 3x32x32 images:
+  configurable conv blocks -> GAP -> Dropout -> Linear(n,1).
+Trained with BCEWithLogitsLoss (+ optional loss variants).
 """
 
 import os
@@ -21,7 +22,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from torchvision import datasets, transforms
 
-from vgg import build_model, VGG16
+from vgg import build_model
 from baseline import prune_nm
 from gate_losses import compute_loss
 
@@ -32,38 +33,70 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = "./runs_gate"
 DENSE_CKPT = "./runs_baseline/dense.pt"
 SPARSE_CKPT = "./runs_baseline/sparse_1_32.pt"
-GATE_INPUT_DIM = 2048
-GATE_HIDDEN_DIM = 256
-GATE_EPOCHS = 20
-GATE_LR = 0.01
-GATE_BATCH_SIZE = 512
+GATE_CHANNELS = [32, 64, 128, 256, 512]
+GATE_EPOCHS = 100
+GATE_LR = 1e-3
+GATE_BATCH_SIZE = 128
+GATE_WARMUP_EPOCHS = 5
+GATE_WEIGHT_DECAY = 1e-4
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2023, 0.1994, 0.2010)
 
 
-class FeatureExtractor(nn.Module):
-    _POOL4_IDX = 33  # 4th MaxPool2d in VGG16 features
+class AugmentedTensorDataset(TensorDataset):
+    def __init__(self, images, labels, train=True):
+        super().__init__(images, labels)
+        if train:
+            self.transform = transforms.Compose([
+                transforms.RandomCrop(32, padding=4, padding_mode='reflect'),
+                transforms.RandomHorizontalFlip(),
+            ])
+        else:
+            self.transform = None
 
-    def __init__(self, model: VGG16):
-        super().__init__()
-        self.backbone = nn.Sequential(*list(model.features.children())[:self._POOL4_IDX + 1])
-
-    def forward(self, x):
-        x = self.backbone(x)
-        x = torch.flatten(x, 1)
-        return x
+    def __getitem__(self, idx):
+        img, label = super().__getitem__(idx)
+        if self.transform:
+            img = self.transform(img)
+        return img, label
 
 
 class GateModel(nn.Module):
-    def __init__(self, input_dim=GATE_INPUT_DIM, hidden_dim=GATE_HIDDEN_DIM):
+    def __init__(self, in_channels=3, channels=None):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
+        if channels is None:
+            channels = GATE_CHANNELS
+
+        layers = []
+        c_in = in_channels
+        for c_out in channels[:-1]:
+            layers.extend([
+                nn.Conv2d(c_in, c_out, 3, padding=1),
+                nn.BatchNorm2d(c_out),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
+            ])
+            c_in = c_out
+
+        last = channels[-1]
+        layers.extend([
+            nn.Conv2d(c_in, last, 3, padding=1),
+            nn.BatchNorm2d(last),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+        ])
+
+        self.features = nn.Sequential(*layers)
+        self.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(last, 1),
+        )
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+        x = self.features(x)
+        x = x.squeeze(-1).squeeze(-1)
+        return self.fc(x)
 
 
 def load_dense_model():
@@ -107,33 +140,28 @@ def create_eval_loaders(data_dir, batch_size, num_workers):
 
 
 @torch.no_grad()
-def extract_features_and_predictions(dense_model, sparse_model, loader):
-    extractor = FeatureExtractor(dense_model).to(DEVICE)
-    extractor.eval()
+def collect_predictions(dense_model, sparse_model, loader):
     dense_model.eval()
     sparse_model.eval()
 
-    all_features = []
+    all_images = []
     all_dense_preds = []
     all_sparse_preds = []
     all_targets = []
 
     for images, targets_batch in loader:
-        images = images.to(DEVICE)
+        all_images.append(images.cpu())
 
-        feats = extractor(images)
-        all_features.append(feats.cpu())
-
-        dense_out = dense_model(images)
+        dense_out = dense_model(images.to(DEVICE))
         all_dense_preds.append(dense_out.argmax(1).cpu())
 
-        sparse_out = sparse_model(images)
+        sparse_out = sparse_model(images.to(DEVICE))
         all_sparse_preds.append(sparse_out.argmax(1).cpu())
 
         all_targets.append(targets_batch)
 
     return (
-        torch.cat(all_features, dim=0),
+        torch.cat(all_images, dim=0),
         torch.cat(all_dense_preds, dim=0),
         torch.cat(all_sparse_preds, dim=0),
         torch.cat(all_targets, dim=0),
@@ -166,14 +194,19 @@ def generate_labels(dense_preds, sparse_preds, targets):
     return labels
 
 
-def train_gate(gate, train_features, train_labels, val_features, val_labels,
+def train_gate(gate, train_images, train_labels,
+               val_images, val_labels,
+               val_dense_preds, val_sparse_preds, val_targets,
                loss_mode="baseline", log_path=None, **loss_kwargs):
     gate = gate.to(DEVICE)
 
-    optimizer = torch.optim.SGD(gate.parameters(), lr=GATE_LR, momentum=0.9, weight_decay=5e-4)
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=GATE_EPOCHS)
+    optimizer = torch.optim.AdamW(gate.parameters(), lr=GATE_LR, weight_decay=GATE_WEIGHT_DECAY)
 
-    train_dataset = TensorDataset(train_features, train_labels.float())
+    warmup = lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=GATE_WARMUP_EPOCHS)
+    cosine = lr_scheduler.CosineAnnealingLR(optimizer, T_max=GATE_EPOCHS - GATE_WARMUP_EPOCHS)
+    scheduler = lr_scheduler.SequentialLR(optimizer, [warmup, cosine], milestones=[GATE_WARMUP_EPOCHS])
+
+    train_dataset = AugmentedTensorDataset(train_images, train_labels.float(), train=True)
     n_pos = train_labels.sum().item()
     n_neg = len(train_labels) - n_pos
     sample_weights = torch.where(train_labels == 1, n_neg / n_pos, 1.0)
@@ -181,14 +214,17 @@ def train_gate(gate, train_features, train_labels, val_features, val_labels,
     train_loader = DataLoader(train_dataset, batch_size=GATE_BATCH_SIZE, sampler=sampler,
                               num_workers=0, pin_memory=True)
 
-    val_features_dev = val_features.to(DEVICE)
+    val_images_dev = val_images.to(DEVICE)
     val_labels_bool = val_labels.bool()
+    val_dense_preds_dev = val_dense_preds.to(DEVICE)
+    val_sparse_preds_dev = val_sparse_preds.to(DEVICE)
+    val_targets_dev = val_targets.to(DEVICE)
 
-    best_val_acc = 0.0
+    best_gated_acc = 0.0
     best_state = None
 
     log_lines = []
-    header = "epoch,total_loss,bce_loss,aux_loss,val_acc,acc_class0,acc_class1,frac_routed_dense"
+    header = "epoch,total_loss,bce_loss,aux_loss,val_acc,gate_acc0,gate_acc1,gated_acc,frac_routed_dense"
     log_lines.append(header)
 
     for epoch in range(1, GATE_EPOCHS + 1):
@@ -197,19 +233,19 @@ def train_gate(gate, train_features, train_labels, val_features, val_labels,
         epoch_bce = 0.0
         epoch_aux = 0.0
         n_samples = 0
-        for batch_feats, batch_labels in train_loader:
-            batch_feats = batch_feats.to(DEVICE)
+        for batch_imgs, batch_labels in train_loader:
+            batch_imgs = batch_imgs.to(DEVICE)
             batch_labels = batch_labels.to(DEVICE)
 
             optimizer.zero_grad()
-            logits = gate(batch_feats).squeeze(1)
+            logits = gate(batch_imgs).squeeze(1)
             result = compute_loss(logits, batch_labels, loss_mode=loss_mode, **loss_kwargs)
             result["loss"].backward()
             optimizer.step()
-            epoch_total += result["loss"].item() * batch_feats.size(0)
-            epoch_bce += result["bce"] * batch_feats.size(0)
-            epoch_aux += result["aux"] * batch_feats.size(0)
-            n_samples += batch_feats.size(0)
+            epoch_total += result["loss"].item() * batch_imgs.size(0)
+            epoch_bce += result["bce"] * batch_imgs.size(0)
+            epoch_aux += result["aux"] * batch_imgs.size(0)
+            n_samples += batch_imgs.size(0)
 
         scheduler.step()
         epoch_total /= n_samples
@@ -218,32 +254,37 @@ def train_gate(gate, train_features, train_labels, val_features, val_labels,
 
         gate.eval()
         with torch.no_grad():
-            val_logits = gate(val_features_dev).squeeze(1).cpu()
+            val_logits = gate(val_images_dev).squeeze(1).cpu()
             val_preds = val_logits > 0
 
         val_acc = (val_preds == val_labels_bool).float().mean().item() * 100
 
-        label_0_mask = val_labels == 0
-        label_1_mask = val_labels == 1
-        acc_0 = (val_preds[label_0_mask] == 0).float().mean().item() * 100 if label_0_mask.any() else 0.0
-        acc_1 = (val_preds[label_1_mask] == 1).float().mean().item() * 100 if label_1_mask.any() else 0.0
+        mask0 = val_labels == 0
+        mask1 = val_labels == 1
+        acc_0 = (val_preds[mask0] == 0).float().mean().item() * 100 if mask0.any() else 0.0
+        acc_1 = (val_preds[mask1] == 1).float().mean().item() * 100 if mask1.any() else 0.0
+
+        gate_sparse = ~val_preds
+        gated_preds = torch.where(gate_sparse, val_sparse_preds, val_dense_preds)
+        gated_acc = (gated_preds == val_targets).float().mean().item() * 100
 
         frac_dense = val_preds.float().mean().item() * 100
-
         n_gate_dense = val_preds.sum().item()
+
         log.info(f"Epoch {epoch:2d}/{GATE_EPOCHS}: Loss={epoch_total:.4f} (BCE={epoch_bce:.4f} Aux={epoch_aux:.4f}) | "
-                 f"ValAcc={val_acc:.2f}% | Acc0={acc_0:.1f}% | Acc1={acc_1:.1f}% | "
+                 f"GateAcc={val_acc:.2f}% | Acc0={acc_0:.1f}% | Acc1={acc_1:.1f}% | "
+                 f"GatedAcc={gated_acc:.2f}% | "
                  f"GateDense={n_gate_dense}/{len(val_preds)} ({frac_dense:.1f}%)")
 
         log_lines.append(f"{epoch},{epoch_total:.6f},{epoch_bce:.6f},{epoch_aux:.6f},"
-                         f"{val_acc:.2f},{acc_0:.2f},{acc_1:.2f},{frac_dense:.1f}")
+                         f"{val_acc:.2f},{acc_0:.2f},{acc_1:.2f},{gated_acc:.2f},{frac_dense:.1f}")
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if gated_acc > best_gated_acc:
+            best_gated_acc = gated_acc
             best_state = {k: v.cpu().clone() for k, v in gate.state_dict().items()}
 
     gate.load_state_dict(best_state)
-    log.info(f"Best val accuracy: {best_val_acc:.2f}%")
+    log.info(f"Best gated accuracy: {best_gated_acc:.2f}%")
 
     if log_path is not None:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -251,14 +292,14 @@ def train_gate(gate, train_features, train_labels, val_features, val_labels,
             f.write("\n".join(log_lines) + "\n")
         log.info(f"Training log saved to {log_path}")
 
-    return gate, best_val_acc
+    return gate, best_gated_acc
 
 
-def evaluate_full(gate, val_features, val_labels, dense_preds, sparse_preds, targets):
+def evaluate_full(gate, val_images, val_labels, dense_preds, sparse_preds, targets):
     gate = gate.to(DEVICE).eval()
 
     with torch.no_grad():
-        gate_logits = gate(val_features.to(DEVICE)).squeeze(1).cpu()
+        gate_logits = gate(val_images.to(DEVICE)).squeeze(1).cpu()
 
     gate_preds = (gate_logits > 0).long()
 
@@ -348,10 +389,10 @@ def main():
     print("  GATE TRAINING: Predict sparse-OK vs needs-dense")
     print("=" * 65)
     print(f"  Device: {DEVICE}")
-    print(f"  Gate: {GATE_INPUT_DIM} -> {GATE_HIDDEN_DIM} -> 1 (BCEWithLogitsLoss)")
-    print(f"  Features: pre-avgpool ({GATE_INPUT_DIM}-dim)")
-    print(f"  Sampling: class-balanced (WeightedRandomSampler)")
-    print(f"  Epochs: {GATE_EPOCHS}, LR: {GATE_LR}")
+    print(f"  Gate: CNN 3->{'->'.join(str(c) for c in GATE_CHANNELS)} -> GAP -> Linear({GATE_CHANNELS[-1]},1)")
+    print(f"  Input: raw 3x32x32 images with augmentation")
+    print(f"  Optimizer: AdamW (lr={GATE_LR}, wd={GATE_WEIGHT_DECAY})")
+    print(f"  Scheduler: {GATE_WARMUP_EPOCHS}ep warmup + cosine to {GATE_EPOCHS}ep")
     print(f"  Label: 1 = dense correct AND sparse incorrect")
     print(f"          0 = everything else")
     print()
@@ -359,33 +400,35 @@ def main():
     dense_model = load_dense_model()
     sparse_model = load_sparse_model()
 
-    log.info("Creating data loaders (no augmentation for feature extraction)...")
+    log.info("Creating data loaders (no augmentation for label generation)...")
     train_loader, val_loader = create_eval_loaders("./data", 128, 4)
 
-    log.info("Generating training dataset...")
-    train_features, train_dense_preds, train_sparse_preds, train_targets = \
-        extract_features_and_predictions(dense_model, sparse_model, train_loader)
+    log.info("Generating labels for training set...")
+    train_images, train_dense_preds, train_sparse_preds, train_targets = \
+        collect_predictions(dense_model, sparse_model, train_loader)
     train_labels = generate_labels(train_dense_preds, train_sparse_preds, train_targets)
 
-    log.info("Generating validation dataset...")
-    val_features, val_dense_preds, val_sparse_preds, val_targets = \
-        extract_features_and_predictions(dense_model, sparse_model, val_loader)
+    log.info("Generating labels for validation set...")
+    val_images, val_dense_preds, val_sparse_preds, val_targets = \
+        collect_predictions(dense_model, sparse_model, val_loader)
     val_labels = generate_labels(val_dense_preds, val_sparse_preds, val_targets)
 
-    log.info("Training gate model...")
+    log.info("Training gate model (with augmentation on raw images)...")
     gate = GateModel()
-    gate, best_val_acc = train_gate(gate, train_features, train_labels, val_features, val_labels)
+    gate, best_gated_acc = train_gate(
+        gate, train_images, train_labels,
+        val_images, val_labels,
+        val_dense_preds, val_sparse_preds, val_targets,
+    )
 
     ckpt_path = f"{BASE_DIR}/gate_checkpoint.pt"
     torch.save({
         "gate_state_dict": gate.state_dict(),
-        "best_val_acc": best_val_acc,
-        "input_dim": GATE_INPUT_DIM,
-        "hidden_dim": GATE_HIDDEN_DIM,
+        "best_gated_acc": best_gated_acc,
     }, ckpt_path)
     log.info(f"Gate checkpoint saved to {ckpt_path}")
 
-    results = evaluate_full(gate, val_features, val_labels, val_dense_preds, val_sparse_preds, val_targets)
+    results = evaluate_full(gate, val_images, val_labels, val_dense_preds, val_sparse_preds, val_targets)
 
     results_path = f"{BASE_DIR}/gate_results.txt"
     with open(results_path, "w") as f:

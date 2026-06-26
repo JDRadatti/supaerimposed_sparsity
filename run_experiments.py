@@ -1,7 +1,7 @@
 """
 run_experiments.py - Run all gate loss variants and compare results.
 
-Orchestrates 7 variants:
+Orchestrates 8 variants:
   0. baseline                     (pure BCE)
   1. entropy_regularized          (BCE + λ·|p̂_dense − p_true|²)
   2. accuracy_weighted (pos=2)    (BCE with pos_weight=2)
@@ -9,6 +9,7 @@ Orchestrates 7 variants:
   4. accuracy_weighted (pos=10)   (BCE with pos_weight=10)
   5. confidence_calibrated        (BCE + λ·|logit| for wrong preds)
   6. flops_aware                  (BCE + λ·fraction_routed_to_dense)
+  7. focal                        (focal loss, gamma=2, alpha=0.75)
 """
 
 import os
@@ -19,11 +20,11 @@ from datetime import datetime
 import torch
 
 from gate import (
-    FeatureExtractor, GateModel,
+    GateModel,
     load_dense_model, load_sparse_model,
-    create_eval_loaders, extract_features_and_predictions,
+    create_eval_loaders, collect_predictions,
     generate_labels, evaluate_full, train_gate,
-    DEVICE, BASE_DIR, GATE_INPUT_DIM, GATE_HIDDEN_DIM,
+    DEVICE, BASE_DIR,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,6 +43,7 @@ def _get_variants(train_labels):
         ("accuracy_weighted_pos=10",  "accuracy_weighted",         {"pos_weight": 10.0}),
         ("confidence_calibrated",     "confidence_calibrated",     {}),
         ("flops_aware",               "flops_aware",               {}),
+        ("focal",                     "focal",                     {}),
     ]
 
 
@@ -114,15 +116,15 @@ def main():
     dense_model = load_dense_model()
     sparse_model = load_sparse_model()
 
-    log.info("Extracting features and predictions (once)...")
+    log.info("Generating labels (once)...")
     train_loader, val_loader = create_eval_loaders("./data", 128, 4)
 
-    train_features, train_dense_preds, train_sparse_preds, train_targets = \
-        extract_features_and_predictions(dense_model, sparse_model, train_loader)
+    train_images, train_dense_preds, train_sparse_preds, train_targets = \
+        collect_predictions(dense_model, sparse_model, train_loader)
     train_labels = generate_labels(train_dense_preds, train_sparse_preds, train_targets)
 
-    val_features, val_dense_preds, val_sparse_preds, val_targets = \
-        extract_features_and_predictions(dense_model, sparse_model, val_loader)
+    val_images, val_dense_preds, val_sparse_preds, val_targets = \
+        collect_predictions(dense_model, sparse_model, val_loader)
     val_labels = generate_labels(val_dense_preds, val_sparse_preds, val_targets)
 
     variants = _get_variants(train_labels)
@@ -138,8 +140,11 @@ def main():
         os.makedirs(exp_dir, exist_ok=True)
 
         gate = GateModel()
-        gate, best_val_acc = train_gate(
-            gate, train_features, train_labels, val_features, val_labels,
+        gate, best_gated_acc = train_gate(
+            gate,
+            train_images, train_labels,
+            val_images, val_labels,
+            val_dense_preds, val_sparse_preds, val_targets,
             loss_mode=loss_mode,
             log_path=os.path.join(exp_dir, "training_log.csv"),
             **kwargs,
@@ -148,16 +153,14 @@ def main():
         ckpt_path = os.path.join(exp_dir, "gate_checkpoint.pt")
         torch.save({
             "gate_state_dict": gate.state_dict(),
-            "best_val_acc": best_val_acc,
-            "input_dim": GATE_INPUT_DIM,
-            "hidden_dim": GATE_HIDDEN_DIM,
+            "best_gated_acc": best_gated_acc,
             "loss_mode": loss_mode,
             "variant_name": variant_name,
         }, ckpt_path)
         log.info(f"Checkpoint saved to {ckpt_path}")
 
         results = evaluate_full(
-            gate, val_features, val_labels,
+            gate, val_images, val_labels,
             val_dense_preds, val_sparse_preds, val_targets,
         )
 
