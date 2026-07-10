@@ -48,10 +48,11 @@ def save_active_bn_stats(model: nn.Module) -> None:
     print(f"[BN] Saved BN buffers for key '{key}' ({n} BN layers).")
 
 
-def restore_bn_stats(model: nn.Module, sparsity_key: str) -> None:
+def restore_bn_stats(model: nn.Module, sparsity_key: str, verbose: bool = True) -> None:
     """Restore BN buffers for *sparsity_key*.  No‑op if no buffers have been saved."""
     if sparsity_key in _bn_buffers:
         _apply_bn_stats(model, _bn_buffers[sparsity_key])
-        print(f"[BN] Restored BN buffers for key '{sparsity_key}'.")
-    else:
+        if verbose:
+            print(f"[BN] Restored BN buffers for key '{sparsity_key}'.")
+    elif verbose:
         print(f"[BN] No saved BN buffers for key '{sparsity_key}', using current.")

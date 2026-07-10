@@ -22,9 +22,10 @@ import torch
 from gate import (
     GateModel,
     load_dense_model, load_sparse_model,
-    create_eval_loaders, collect_predictions,
-    generate_labels, evaluate_full, train_gate,
+    create_eval_loaders, extract_sparse_features_and_predictions,
+    generate_labels, evaluate_full, train_gate, normalize_features,
     DEVICE, BASE_DIR,
+    GATE_IN_CHANNELS, GATE_CONV_CHANNELS,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -52,20 +53,20 @@ def _save_experiment_results(results, exp_dir, variant_name):
     with open(results_path, "w") as f:
         f.write(f"Gate Results — {variant_name}\n")
         f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-        f.write(f"Gate Binary Accuracy:      {results['gate_acc']:.2f}%\n")
-        f.write(f"Precision (needs-dense):   {results['precision']:.2f}%\n")
-        f.write(f"Recall (needs-dense):      {results['recall']:.2f}%\n\n")
-        f.write(f"Gated System Accuracy:     {results['gated_acc']:.2f}%\n")
-        f.write(f"Dense Only Accuracy:       {results['dense_only_acc']:.2f}%\n")
-        f.write(f"Sparse Only Accuracy:      {results['sparse_only_acc']:.2f}%\n")
-        f.write(f"Improvement over sparse:   {results['gated_acc'] - results['sparse_only_acc']:+.2f}%\n")
-        f.write(f"Gap to dense:              {results['dense_only_acc'] - results['gated_acc']:+.2f}%\n\n")
+        f.write(f"Gate Binary Accuracy:       {results['gate_acc']:.2f}%\n")
+        f.write(f"Precision (sparse-correct): {results['precision']:.2f}%\n")
+        f.write(f"Recall (sparse-correct):    {results['recall']:.2f}%\n\n")
+        f.write(f"Gated System Accuracy:      {results['gated_acc']:.2f}%\n")
+        f.write(f"Dense Only Accuracy:        {results['dense_only_acc']:.2f}%\n")
+        f.write(f"Sparse Only Accuracy:       {results['sparse_only_acc']:.2f}%\n")
+        f.write(f"Improvement over sparse:    {results['gated_acc'] - results['sparse_only_acc']:+.2f}%\n")
+        f.write(f"Gap to dense:               {results['dense_only_acc'] - results['gated_acc']:+.2f}%\n\n")
         f.write(f"2x2x2 Breakdown:\n")
         for name, count in results["categories"].items():
             f.write(f"  {name}: {count}\n")
         f.write(f"\nMode Distribution:\n")
-        f.write(f"  1:32:  {results['mode_distribution']['1:32']}\n")
-        f.write(f"  Dense: {results['mode_distribution']['dense']}\n")
+        f.write(f"  Sparse: {results['mode_distribution']['sparse']}\n")
+        f.write(f"  Dense:  {results['mode_distribution']['dense']}\n")
     log.info(f"Results saved to {results_path}")
 
 
@@ -80,7 +81,7 @@ def _print_comparison(all_results):
     for name, r in all_results:
         delta_sparse = r["gated_acc"] - r["sparse_only_acc"]
         delta_dense = r["dense_only_acc"] - r["gated_acc"]
-        route_pct = 100 * r["mode_distribution"]["dense"] / (r["mode_distribution"]["dense"] + r["mode_distribution"]["1:32"])
+        route_pct = 100 * r["mode_distribution"]["sparse"] / (r["mode_distribution"]["sparse"] + r["mode_distribution"]["dense"])
         print(f"{name:<28} {r['gate_acc']:>7.2f}% {r['gated_acc']:>8.2f}% "
               f"{delta_sparse:>+8.2f}% {delta_dense:>+7.2f}% "
               f"{route_pct:>7.1f}% {r['precision']:>7.2f}% {r['recall']:>7.2f}%")
@@ -116,16 +117,19 @@ def main():
     dense_model = load_dense_model()
     sparse_model = load_sparse_model()
 
-    log.info("Generating labels (once)...")
+    log.info("Extracting sparse pool1 features and generating labels (once)...")
     train_loader, val_loader = create_eval_loaders("./data", 128, 4)
 
-    train_images, train_dense_preds, train_sparse_preds, train_targets = \
-        collect_predictions(dense_model, sparse_model, train_loader)
+    train_features, train_dense_preds, train_sparse_preds, train_targets = \
+        extract_sparse_features_and_predictions(sparse_model, dense_model, train_loader)
     train_labels = generate_labels(train_dense_preds, train_sparse_preds, train_targets)
 
-    val_images, val_dense_preds, val_sparse_preds, val_targets = \
-        collect_predictions(dense_model, sparse_model, val_loader)
+    val_features, val_dense_preds, val_sparse_preds, val_targets = \
+        extract_sparse_features_and_predictions(sparse_model, dense_model, val_loader)
     val_labels = generate_labels(val_dense_preds, val_sparse_preds, val_targets)
+
+    log.info("Normalizing gate features (per-channel)...")
+    train_features, val_features = normalize_features(train_features, val_features)
 
     variants = _get_variants(train_labels)
 
@@ -142,8 +146,8 @@ def main():
         gate = GateModel()
         gate, best_gated_acc = train_gate(
             gate,
-            train_images, train_labels,
-            val_images, val_labels,
+            train_features, train_labels,
+            val_features, val_labels,
             val_dense_preds, val_sparse_preds, val_targets,
             loss_mode=loss_mode,
             log_path=os.path.join(exp_dir, "training_log.csv"),
@@ -154,13 +158,15 @@ def main():
         torch.save({
             "gate_state_dict": gate.state_dict(),
             "best_gated_acc": best_gated_acc,
+            "in_channels": GATE_IN_CHANNELS,
+            "conv_channels": GATE_CONV_CHANNELS,
             "loss_mode": loss_mode,
             "variant_name": variant_name,
         }, ckpt_path)
         log.info(f"Checkpoint saved to {ckpt_path}")
 
         results = evaluate_full(
-            gate, val_images, val_labels,
+            gate, val_features, val_labels,
             val_dense_preds, val_sparse_preds, val_targets,
         )
 
