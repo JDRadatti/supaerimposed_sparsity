@@ -1,7 +1,10 @@
 /__pycache__
+*/__pycache__
 .DS_STORE
 /runs
+*/runs
 runs.zip
 /data
+*/data
 data.zip
 /.venv
