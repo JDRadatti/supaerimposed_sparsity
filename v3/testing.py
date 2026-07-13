@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+import sparse as _sparse
+
 
 def build_truly_pruned(
     model: nn.Module,
@@ -19,28 +21,49 @@ def build_truly_pruned(
 ) -> nn.Module:
     """Create a deep copy of *model* with masked weights set to exactly zero.
 
-    The returned model does **not** use forward patching — the zeros are
-    baked into the weights.  Comparing its outputs against a `SparsityModel`
-    in the same mode verifies that the patched forward is numerically
-    equivalent to true pruning.
+    Uses the same N:M mask primitives as ``SparsityModel`` to compute masks,
+    then bakes the zeros directly into the weights.  The returned model does
+    **not** use forward patching — zeros are real.
+
+    Comparing its outputs against a ``SparsityModel`` in the same mode
+    verifies that the patched forward is numerically equivalent to true
+    pruning.
 
     Parameters
     ----------
-    model:        The source `nn.Module`.
-    mode_profile: A `ModeProfile` describing which layers get which N:M mask.
+    model:        Source ``nn.Module`` (e.g. a newly built VGG16).
+    mode_profile: A ``ModeProfile`` describing which layers get which N:M mask.
 
     Returns:
-        A new `nn.Module` with weights zeroed at pruned positions.
+        A new ``nn.Module`` with pruned weights clipped to zero.
+
+    Raises:
+        ValueError: If *mode_profile* fails validation against *model*.
     """
-    # 1. Deep‑copy the model.
     pruned: nn.Module = copy.deepcopy(model)
 
-    # 2. For each layer covered by the mode_profile's layer_specs:
-    #    a. Compute the N:M mask from the current weight.
-    #    b. Multiply the weight by the mask in‑place.
-    # 3. Return the pruned model (no forward patching needed — zeros are real).
+    # Use the same validation to get the layer→sparsity map.
+    from .profiles import _validate_mode_profile
+    layer_map = _validate_mode_profile(pruned, mode_profile)
 
-    ...
+    name_to_module = dict(pruned.named_modules())
+
+    for module_fqn, sparsity in layer_map.items():
+        if sparsity == "dense":
+            continue
+
+        module = name_to_module[module_fqn]
+        N, M = sparsity
+        w = module.weight.data
+
+        if isinstance(module, nn.Conv2d):
+            mask = _sparse._nm_mask_conv2d_axis(w, N, M, axis=mode_profile.conv_axis)
+        else:
+            mask = _sparse._nm_mask_linear(w, N, M, orientation=mode_profile.linear_orientation)
+
+        w.mul_(mask.to(w.device))
+
+    return pruned
 
 
 def compare_models(
@@ -50,6 +73,7 @@ def compare_models(
     device: torch.device | None = None,
     atol: float = 1e-8,
     rtol: float = 1e-5,
+    max_batches: int | None = None,
 ) -> dict[str, Any]:
     """Compare the outputs of two models across a dataloader.
 
@@ -60,18 +84,19 @@ def compare_models(
     model_a:  First model.
     model_b:  Second model.
     loader:   DataLoader providing inputs.
-    device:   Device to run on (default: auto‑detect from model_a).
-    atol:     Absolute tolerance for `torch.allclose`.
-    rtol:     Relative tolerance for `torch.allclose`.
+    device:   Device to run on (default: auto‑detect from *model_a*).
+    atol:     Absolute tolerance for ``torch.allclose``.
+    rtol:     Relative tolerance for ``torch.allclose``.
+    max_batches:  Stop after this many batches (``None`` = full dataloader).
 
     Returns:
         A dict with keys:
-        - `"all_close"`: `bool` — `True` if all outputs match within tol.
-        - `"max_abs_diff"`: `float` — largest per‑element difference.
-        - `"max_rel_diff"`: `float` — largest relative difference (where
+        - ``"all_close"``: ``bool`` — ``True`` if all outputs match within tol.
+        - ``"max_abs_diff"``: ``float`` — largest per‑element difference.
+        - ``"max_rel_diff"``: ``float`` — largest relative difference (where
           reference != 0).
-        - `"n_samples"`: `int` — total samples compared.
-        - `"n_different"`: `int` — samples where outputs differ.
+        - ``"n_samples"``: ``int`` — total samples compared.
+        - ``"n_different"``: ``int`` — samples where outputs differ.
     """
     if device is None:
         device = next(model_a.parameters()).device
@@ -86,7 +111,9 @@ def compare_models(
     all_close = True
 
     with torch.no_grad():
-        for batch in loader:
+        for i, batch in enumerate(loader):
+            if max_batches is not None and i >= max_batches:
+                break
             if isinstance(batch, (list, tuple)):
                 inputs = batch[0].to(device)
             else:
@@ -102,9 +129,9 @@ def compare_models(
 
             # Relative difference (avoid division by zero).
             a_abs = out_a.abs()
-            mask = a_abs > 1e-6
-            if mask.any():
-                rel_diff = (abs_diff[mask] / a_abs[mask]).max().item()
+            nonzero = a_abs > 1e-6
+            if nonzero.any():
+                rel_diff = (abs_diff[nonzero] / a_abs[nonzero]).max().item()
                 if rel_diff > max_rel_diff:
                     max_rel_diff = rel_diff
 
@@ -119,4 +146,45 @@ def compare_models(
         "max_rel_diff": max_rel_diff,
         "n_samples": n_samples,
         "n_different": n_different,
+    }
+
+
+def compare_single_input(
+    model_a: nn.Module,
+    model_b: nn.Module,
+    x: torch.Tensor,
+    device: torch.device | None = None,
+    atol: float = 1e-8,
+    rtol: float = 1e-5,
+) -> dict[str, Any]:
+    """Run both models on a single input tensor — no dataloader required.
+
+    Parameters
+    ----------
+    model_a:  First model.
+    model_b:  Second model.
+    x:        Input tensor of shape ``[batch, *dims]``.
+    device:   Device to run on (default: auto‑detect from *model_a*).
+    atol:     Absolute tolerance.
+    rtol:     Relative tolerance.
+
+    Returns:
+        Dict with ``"all_close"`` and ``"max_abs_diff"``.
+    """
+    if device is None:
+        device = next(model_a.parameters()).device
+
+    model_a = model_a.to(device).eval()
+    model_b = model_b.to(device).eval()
+    x = x.to(device)
+
+    with torch.no_grad():
+        out_a = model_a(x)
+        out_b = model_b(x)
+
+    abs_diff = (out_a - out_b).abs()
+
+    return {
+        "all_close": torch.allclose(out_a, out_b, atol=atol, rtol=rtol),
+        "max_abs_diff": abs_diff.max().item(),
     }

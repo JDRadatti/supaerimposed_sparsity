@@ -126,15 +126,116 @@ def visualize_diff(
 ) -> None:
     """Write a CSV comparing two models' weights element‑by‑element.
 
+    If *model_a* is a ``SparsityModel`` and *mode_name* is given, the
+    mask from that mode profile is applied to *model_a*'s weights before
+    comparison (so you see the effective sparse weight vs. *model_b*'s
+    raw weight).  Group ordering respects the mask axis.
+
+    One CSV file ``visualize_diff_{mode_name}.csv`` is written per mode
+    into the run directory.
+
     Parameters
     ----------
-    model_a:    The reference model (or first ``SparsityModel``).
-    model_b:    The comparison model (or second ``SparsityModel``).
-    mode_name:  If given, only compare using this mode profile's masks.
-                Otherwise compares raw weights (all with ``"."`` mask column).
+    model_a:    The reference model (typically a ``SparsityModel``).
+    model_b:    The comparison model (e.g. a ``build_truly_pruned`` model).
+    mode_name:  If given, use this mode profile's masks and axis info.
+                If ``None``, compare raw weights with no mask awareness.
     first_n:    How many elements to print per layer (default 50).
     """
-    ...
+    # ── Determine inner models ──────────────────────────────────────
+    inner_a = model_a._model if hasattr(model_a, "_model") else model_a
+    inner_b = model_b._model if hasattr(model_b, "_model") else model_b
+
+    # ── Determine which layers to compare ───────────────────────────
+    if mode_name is not None and hasattr(model_a, "_mode_layer_map"):
+        layer_map = model_a._mode_layer_map[mode_name]
+        profile = model_a._mode_profiles[mode_name]
+    else:
+        # Compare all Conv/Linear layers raw.
+        layer_map = {}
+        for n, m in inner_a.named_modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)) and hasattr(m, "weight"):
+                layer_map[n] = "dense"
+        profile = None
+
+    # ── Logger ──────────────────────────────────────────────────────
+    logger: Any = getattr(model_a, "_logger", None)
+    if logger is None:
+        from .output import OutputLogger
+        from .profiles import OutputOptions
+        logger = OutputLogger(OutputOptions())
+        if hasattr(model_a, "_logger"):
+            model_a._logger = logger
+
+    if logger.run_dir is None:
+        logger.start_run(
+            "visualize_diff",
+            profiles_info={},
+            model_info={"model_class": type(inner_a).__name__},
+        )
+
+    # ── Layer assignments for file header ───────────────────────────
+    layer_assignments: dict[str, str] = {}
+    for fqn, s in layer_map.items():
+        layer_assignments[fqn] = s if isinstance(s, str) else f"{s[0]}:{s[1]}"
+
+    header_lines = _build_diff_file_header(
+        mode_name=mode_name or "raw",
+        layer_assignments=layer_assignments,
+        commit=logger.commit,
+        branch=logger.branch,
+    )
+
+    diff_name = mode_name if mode_name else "raw"
+    csv_path, csv_file = logger.open_diff_csv(diff_name, header_lines)
+
+    name_to_module_a = dict(inner_a.named_modules())
+    name_to_module_b = dict(inner_b.named_modules())
+
+    try:
+        for module_fqn, sparsity in layer_map.items():
+            if module_fqn not in name_to_module_a or module_fqn not in name_to_module_b:
+                continue
+
+            mod_a = name_to_module_a[module_fqn]
+            mod_b = name_to_module_b[module_fqn]
+            weight_b = mod_b.weight.detach()
+            sparsity_str = sparsity if isinstance(sparsity, str) else f"{sparsity[0]}:{sparsity[1]}"
+
+            # Raw weight from model_a (mask is NOT applied — we want to
+            # see the stored values behind pruned positions).
+            mask = None
+            axis_info = None
+            if hasattr(model_a, "_mode_layer_map") and mode_name is not None:
+                mask = _get_mask_for_layer(mod_a, sparsity)
+                if profile is not None:
+                    axis_info = _axis_info_for_module(mod_a, profile)
+            weight_a_raw = mod_a.weight.detach()
+
+            # Freeze mask (only from model_a, if it is a SparsityModel).
+            freeze_mask = None
+            if hasattr(model_a, "_element_freeze_masks"):
+                freeze_mask = _get_freeze_mask_for_param(model_a, mod_a.weight)
+
+            diff = weight_a_raw - weight_b
+
+            _write_diff_layer(
+                csv_file=csv_file,
+                weight_a=weight_a_raw,
+                weight_b=weight_b,
+                diff=diff,
+                mask=mask,
+                freeze_mask=freeze_mask,
+                layer_name=module_fqn,
+                sparsity=sparsity_str,
+                mode_name=mode_name or "raw",
+                axis_info=axis_info,
+                first_n=first_n,
+            )
+    finally:
+        csv_file.close()
+
+    logger.finish_run()
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +471,121 @@ def _group_size_from_sparsity(sparsity: str) -> int | None:
         except ValueError:
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Diff helpers
+# ---------------------------------------------------------------------------
+
+def _build_diff_file_header(
+    mode_name: str,
+    layer_assignments: dict[str, str],
+    commit: str,
+    branch: str,
+) -> list[str]:
+    """Build the metadata header lines for a diff visualization CSV."""
+    header: list[str] = []
+    header.append(f"Weight diff -- mode: {mode_name!r}")
+    header.append(f"Commit: {commit}  Branch: {branch}")
+    header.append("")
+    parts = [f"{n}={s}" for n, s in layer_assignments.items()]
+    header.append(f"Layer sparsity: {', '.join(parts)}")
+    header.append("")
+    header.append("Legend: M=kept by mask, F=frozen, .=trainable")
+    return header
+
+
+def _write_diff_layer(
+    csv_file: Any,
+    weight_a: torch.Tensor,
+    weight_b: torch.Tensor,
+    diff: torch.Tensor,
+    mask: torch.Tensor | None,
+    freeze_mask: torch.Tensor | None,
+    layer_name: str,
+    sparsity: str,
+    mode_name: str,
+    axis_info: tuple[str, str] | None,
+    first_n: int,
+) -> None:
+    """Write diff stats and data rows for a single layer.
+
+    Parameters
+    ----------
+    csv_file:    Raw file handle open for writing.
+    weight_a:    Effective weight from model A (mask applied if present).
+    weight_b:    Raw weight from model B.
+    diff:        ``weight_a - weight_b``.
+    mask:        Mask tensor for model A, or ``None``.
+    freeze_mask: Boolean freeze mask, or ``None``.
+    layer_name:  Module FQN.
+    sparsity:    String like ``"dense"``, ``"1:4"``, ``"1:32"``.
+    mode_name:   Mode profile name.
+    axis_info:   ``("conv", "out")`` etc., or ``None`` for dense.
+    first_n:     Max elements to print.
+    """
+    shape = tuple(weight_a.shape)
+    total = weight_a.numel()
+    M = _group_size_from_sparsity(sparsity)
+
+    # ── Stats ───────────────────────────────────────────────────────
+    diff_flat = diff.flatten()
+    n_different = int((diff_flat.abs() > 1e-8).sum().item())
+    n_identical = total - n_different
+    max_abs_diff_val = diff_flat.abs().max().item()
+    n_masked = int(mask.sum().item()) if mask is not None else 0
+    n_frozen = int(freeze_mask.sum().item()) if freeze_mask is not None else 0
+
+    # ── Stats block (raw write) ─────────────────────────────────────
+    f = csv_file
+    f.write("\n")
+    f.write(f"# Layer: {layer_name}  shape={shape}  sparsity={sparsity}\n")
+    f.write(f"# mode={mode_name}\n")
+    f.write(
+        f"# total_elements={total}  identical={n_identical}  different={n_different}"
+        f"  max_abs_diff={max_abs_diff_val:.6e}\n"
+    )
+    f.write(f"# kept_by_mask={n_masked}  frozen={n_frozen}\n")
+    f.write("\n")
+
+    # ── Column header ───────────────────────────────────────────────
+    writer = csv.writer(f, lineterminator="\n")
+    writer.writerow(["index", "pos_in_group", "before", "after", "diff", "masked", "frozen"])
+
+    # ── Reshape for axis‑aware group ordering ────────────────────────
+    if M is not None and mask is not None and axis_info is not None:
+        w_a, m_grouped, f_grouped = _reshape_for_axis(weight_a, mask, freeze_mask, axis_info, M)
+        w_b, _, _ = _reshape_for_axis(weight_b, mask, None, axis_info, M)
+        d_grouped, _, _ = _reshape_for_axis(diff, mask, None, axis_info, M)
+    else:
+        w_a = weight_a.flatten().unsqueeze(1)
+        w_b = weight_b.flatten().unsqueeze(1)
+        d_grouped = diff.flatten().unsqueeze(1)
+        m_grouped = None
+        f_grouped = freeze_mask.flatten().unsqueeze(1) if freeze_mask is not None else None
+        M = 1
+
+    n_groups = w_a.shape[0]
+    n_shown = min(first_n, n_groups * M)
+
+    # ── Data rows ───────────────────────────────────────────────────
+    row_count = 0
+    for group in range(n_groups):
+        for pos in range(M):
+            if row_count >= n_shown:
+                break
+            val_a = w_a[group, pos].item()
+            val_b = w_b[group, pos].item()
+            val_d = d_grouped[group, pos].item()
+            mval = "M" if (m_grouped is not None and m_grouped[group, pos].item() == 1) else "."
+            fval = "."
+            if f_grouped is not None and f_grouped[group, pos].item():
+                fval = "F"
+            writer.writerow(
+                [row_count, f"{pos}/{M}",
+                 f"{val_a:+.6f}", f"{val_b:+.6f}", f"{val_d:+.6e}",
+                 mval, fval]
+            )
+            row_count += 1
+        if row_count >= n_shown:
+            break

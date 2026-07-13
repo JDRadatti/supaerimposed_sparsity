@@ -219,6 +219,32 @@ class OutputLogger:
             f.write(f"# {line}\n")
         return path, f
 
+    def open_diff_csv(
+        self,
+        mode_name: str,
+        header_lines: list[str],
+    ) -> tuple[str, Any]:
+        """Open a CSV file for `visualize_diff()` output.
+
+        Same behaviour as ``open_visualize_csv`` but uses a ``visualize_diff_``
+        filename prefix.
+
+        Args:
+            mode_name:      Name of the mode being diffed.
+            header_lines:   Lines to write as `# ...` comments.
+
+        Returns:
+            `(file_path, file_handle)`.
+        """
+        if self._run_dir is None:
+            raise RuntimeError("OutputLogger.start_run() must be called first.")
+
+        path = str(Path(self._run_dir) / f"visualize_diff_{mode_name}.csv")
+        f = open(path, "w", newline="")
+        for line in header_lines:
+            f.write(f"# {line}\n")
+        return path, f
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
