@@ -65,7 +65,8 @@ def visualize(
     for mode_name in mode_names:
         layer_map = sparsity_model._mode_layer_map[mode_name]
         profile = sparsity_model._mode_profiles[mode_name]
-        freeze_name = sparsity_model._active_freeze or "none"
+        freeze_names = sparsity_model._active_freeze
+        freeze_name = ", ".join(freeze_names) if freeze_names else "none"
 
         # Build compact layer→sparsity summary for the file header.
         layer_assignments: dict[str, str] = {}
@@ -259,7 +260,12 @@ def _get_freeze_mask_for_param(
     sparsity_model: Any,
     param: torch.nn.Parameter,
 ) -> torch.Tensor | None:
-    """Return the boolean element‑freeze mask for *param*, or ``None``."""
+    """Return the boolean freeze mask for *param*, or ``None``.
+
+    Fully‑frozen params (in ``_frozen_params``) return an all‑True mask.
+    """
+    if param in sparsity_model._frozen_params:
+        return torch.ones_like(param, dtype=torch.bool)
     return sparsity_model._element_freeze_masks.get(param, None)
 
 
@@ -372,6 +378,7 @@ def _write_layer_visualization(
         M = 1
 
     n_groups = w_grouped.shape[0]
+    M = min(M, w_grouped.shape[1])   # handle axis_size < M fallback
     n_shown = min(first_n, n_groups * M)
 
     # ── Data rows (row‑major: groups outer, positions inner) ─────────
@@ -451,7 +458,15 @@ def _reshape_for_axis(
         return w, m, fm
 
     # Split the last dim into groups of M.
+    # The N:M mask code pads when axis_size < M, but visualisation cannot
+    # meaningfully group fewer elements than M — fall back to flat.
     axis_size = w.shape[1]
+    if axis_size < M:
+        w = w.flatten().unsqueeze(1)
+        m = m.flatten().unsqueeze(1)
+        if fm is not None:
+            fm = fm.flatten().unsqueeze(1)
+        return w, m, fm
     w = w.reshape(-1, axis_size // M, M).reshape(-1, M)
     m = m.reshape(-1, axis_size // M, M).reshape(-1, M)
     if fm is not None:
@@ -566,6 +581,7 @@ def _write_diff_layer(
         M = 1
 
     n_groups = w_a.shape[0]
+    M = min(M, w_a.shape[1])   # handle axis_size < M fallback
     n_shown = min(first_n, n_groups * M)
 
     # ── Data rows ───────────────────────────────────────────────────
