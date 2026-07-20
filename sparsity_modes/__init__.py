@@ -41,7 +41,7 @@ from .bn_buffers import (
 )
 
 # Training
-from .training import train
+from .training import train, train_joint
 
 # Evaluation
 from .evaluation import evaluate_all_sparsity_modes
@@ -103,6 +103,7 @@ __all__ = [
     
     # Training
     'train',
+    'train_joint',
     
     # Evaluation
     'evaluate_all_sparsity_modes',
