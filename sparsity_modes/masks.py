@@ -48,6 +48,12 @@ def inject_switchable_mask(
             module.nm_masks = {}
             module.nm_masks['dense'] = None
 
+        # Store axis info for visualization
+        if isinstance(module, nn.Conv2d):
+            module._conv_axis = conv_axis
+        elif isinstance(module, nn.Linear):
+            module._linear_orientation = linear_orientation
+
         # Generate the N:M Mask
         if sparsity_key not in module.nm_masks:
             w = module.weight.detach()

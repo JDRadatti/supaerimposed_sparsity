@@ -23,7 +23,7 @@ from .freeze import (
 from .bn_buffers import save_active_bn_stats, restore_bn_stats
 from .evaluation import evaluate_all_sparsity_modes
 from .validation import snapshot_parameters, verify_after_training
-from .logger import debug
+from .logger import debug, info
 
 
 def train(
@@ -40,6 +40,7 @@ def train(
     scheduler_fn: Callable | None = None,
     label_smoothing: float = 0.0,
     cutout: int = 0,
+    on_epoch: Callable[[int, float, float, float, float, float], None] | None = None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -117,7 +118,19 @@ def train(
         scheduler.step()
 
         val_loss, val_acc = vgg.evaluate(model, val_loader, device)
-        debug(f"Epoch {epoch+1}: Train Acc {100*correct/total:.2f}% | Val Acc {val_acc:.2f}%")
+        current_lr = scheduler.get_last_lr()[0]
+        info(f"Epoch {epoch:3d}:  train_loss={loss_sum / total:.4f}  train_acc={100.0 * correct / total:.2f}%"
+             f"  val_loss={val_loss:.4f}  val_acc={val_acc:.2f}%  lr={current_lr:.6f}")
+
+        if on_epoch is not None:
+            on_epoch(
+                epoch,
+                loss_sum / total,
+                100.0 * correct / total,
+                val_loss,
+                val_acc,
+                current_lr,
+            )
 
         # 
         # Verify snapshot
