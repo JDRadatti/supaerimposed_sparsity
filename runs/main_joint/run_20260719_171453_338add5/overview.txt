@@ -1,0 +1,30 @@
+============================================================
+  OVERVIEW
+  Run: runs/main_joint/run_20260719_171453_338add5
+  Timestamp: 20260719_171453
+  Git: 338add5 on branch logging
+  Model: VGG16
+  Total parameters: 14,986,698
+============================================================
+
+  Layer Shapes:
+    features.0     Conv2d(3, 64, 3x3)       1,728 params
+    features.3     Conv2d(64, 64, 3x3)      36,864 params
+    features.7     Conv2d(64, 128, 3x3)     73,728 params
+    features.10    Conv2d(128, 128, 3x3)    147,456 params
+    features.14    Conv2d(128, 256, 3x3)    294,912 params
+    features.17    Conv2d(256, 256, 3x3)    589,824 params
+    features.20    Conv2d(256, 256, 3x3)    589,824 params
+    features.24    Conv2d(256, 512, 3x3)    1,179,648 params
+    features.27    Conv2d(512, 512, 3x3)    2,359,296 params
+    features.30    Conv2d(512, 512, 3x3)    2,359,296 params
+    features.34    Conv2d(512, 512, 3x3)    2,359,296 params
+    features.37    Conv2d(512, 512, 3x3)    2,359,296 params
+    features.40    Conv2d(512, 512, 3x3)    2,359,296 params
+    classifier.0   Linear(512, 512)         262,144 params
+    classifier.3   Linear(512, 10)          5,120 params
+
+  Current Freeze State:
+    (none)
+
+============================================================

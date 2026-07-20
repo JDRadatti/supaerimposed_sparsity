@@ -4,6 +4,7 @@ sparsity_modes/__pycache__
 __MACOSX/
 /old
 *.pt
+*.log
 runs.zip
 /data
 data.zip
