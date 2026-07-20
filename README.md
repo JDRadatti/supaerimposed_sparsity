@@ -31,9 +31,9 @@ python3 main.py
 ## Run `main_joint.py`
 
 `main_joint.py` uses a joint training method from "Slimmable Neural Networks"
-(Yu et al., 2019). We first inject all masks (dense, 1:32, 1:16, 1:8, 1:4) and
-then rotate the mask each epoch. Each sparsity mode maintains its own copy of
-the BN stats buffer.
+(Yu et al., 2019). Each batch computes losses for all sparsity modes,
+accumulates gradients, and performs a single shared optimizer step. Each
+sparsity mode maintains its own copy of the BN stats buffer.
 
 Total epochs = 200
 
