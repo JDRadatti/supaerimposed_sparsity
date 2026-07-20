@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .freeze import is_frozen, _element_freeze_masks, frozen_parameter_names
+from .logger import debug
 
 
 def snapshot_parameters(model: nn.Module):
@@ -89,7 +90,7 @@ def verify_after_training(
     # Verify element-wise frozen positions
     #
     if not _element_freeze_masks:
-        print("[VERIFY] No element-freeze masks registered, skipping element check.")
+        debug("[VERIFY] No element-freeze masks registered, skipping element check.")
     else:
         name_to_param = dict(model.named_parameters())
         for name, p in name_to_param.items():
@@ -108,7 +109,7 @@ def verify_after_training(
                     f"   before[:5] : {before[frozen_pos].view(-1)[:5]}\n"
                     f"   after[:5]  : {p.data[frozen_pos].view(-1)[:5]}"
                 )
-    print("[VERIFY] All checks passed (frozen + element-freeze).")
+    debug("[VERIFY] All checks passed (frozen + element-freeze).")
     return True
 
 
@@ -136,12 +137,12 @@ def compare_snapshots(
     """
     name_to_param = dict(model.named_parameters())
 
-    print(f"\n{'=' * 70}")
-    print("PARAMETER COMPARISON")
-    print(f"{'=' * 70}")
-    print("  [idx] (before, after, diff, mask, protect)")
-    print("  mask:    1 = kept by mask, 0 = pruned, '' = not masked")
-    print("  protect: F = frozen, . = trainable")
+    debug(f"\n{'=' * 70}")
+    debug("PARAMETER COMPARISON")
+    debug(f"{'=' * 70}")
+    debug("  [idx] (before, after, diff, mask, protect)")
+    debug("  mask:    1 = kept by mask, 0 = pruned, '' = not masked")
+    debug("  protect: F = frozen, . = trainable")
 
     device = next(model.parameters()).device
 
@@ -154,7 +155,7 @@ def compare_snapshots(
         after_vals = after["params"][name].flatten().to(device)
         n = before_vals.numel()
 
-        print(f"\n  {name}  ({n} elem)  shape={tuple(p.shape)}")
+        debug(f"\n  {name}  ({n} elem)  shape={tuple(p.shape)}")
 
         # ---- Mask overlay ----
         mask_flat = None
@@ -198,7 +199,7 @@ def compare_snapshots(
                                  atol=atol, rtol=rtol):
                 n_changed += 1
 
-            print(f"    [{idx:4d}] ({b:+.4f}, {a:+.4f}, {d:+.4f}, {m}, {c})")
+            debug(f"    [{idx:4d}] ({b:+.4f}, {a:+.4f}, {d:+.4f}, {m}, {c})")
 
         if line_cap is not None and n > line_cap:
             remaining = diff[line_cap:]
@@ -209,8 +210,8 @@ def compare_snapshots(
                 n_protected += n - line_cap
             elif elem_freeze_flat is not None:
                 n_protected += elem_freeze_flat[line_cap:].sum().item()
-            print(f"    ... ({n - line_cap} more elements)")
+            debug(f"    ... ({n - line_cap} more elements)")
 
-        print(f"    summary: {n_changed}/{n} changed  |  {n_protected} protected  |  {n - n_protected} trained")
+        debug(f"    summary: {n_changed}/{n} changed  |  {n_protected} protected  |  {n - n_protected} trained")
 
-    print(f"\n{'=' * 70}\n")
+    debug(f"\n{'=' * 70}\n")

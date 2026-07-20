@@ -60,6 +60,15 @@ from .checkpoints import (
     load_checkpoint,
 )
 
+# Output
+from .output import OutputLogger
+
+# Visualization
+from .visualize import visualize, visualize_diff
+
+# Logging helpers
+from .logger import build_overview, build_phase_summary
+
 
 __all__ = [
     # Masks
@@ -107,4 +116,15 @@ __all__ = [
     # Checkpoints
     'save_checkpoint',
     'load_checkpoint',
+    
+    # Output
+    'OutputLogger',
+    
+    # Visualization
+    'visualize',
+    'visualize_diff',
+    
+    # Logging helpers
+    'build_overview',
+    'build_phase_summary',
 ]

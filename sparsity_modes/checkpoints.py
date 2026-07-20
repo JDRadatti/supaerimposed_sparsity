@@ -14,6 +14,7 @@ from .freeze import (
     _element_freeze_masks,
 )
 from .bn_buffers import _bn_buffers
+from .logger import debug
 
 
 def save_checkpoint(
@@ -73,11 +74,11 @@ def save_checkpoint(
         checkpoint['metrics'] = metrics
 
     torch.save(checkpoint, path)
-    print(f"[SAVE] Checkpoint saved to {path}")
+    debug(f"[SAVE] Checkpoint saved to {path}")
     if metrics and 'eval' in metrics:
-        print(f"  eval summary:")
+        debug(f"  eval summary:")
         for key, (loss, acc) in metrics['eval'].items():
-            print(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
+            debug(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
 
 
 def load_checkpoint(
@@ -130,14 +131,14 @@ def load_checkpoint(
     for skey, mdict in checkpoint.get('bn_buffers', {}).items():
         _bn_buffers[skey] = mdict  # kept on cpu; moved to active device at restore time
     if _bn_buffers:
-        print(f"  Restored BN buffers for keys: {list(_bn_buffers.keys())}")
+        debug(f"  Restored BN buffers for keys: {list(_bn_buffers.keys())}")
     else:
-        print(f"  [BN] No BN buffers found in checkpoint")
+        debug(f"  [BN] No BN buffers found in checkpoint")
 
-    print(f"[LOAD] Checkpoint loaded from {path}")
+    debug(f"[LOAD] Checkpoint loaded from {path}")
     saved_metrics = checkpoint.get('metrics', {})
     if 'eval' in saved_metrics:
-        print(f"  original eval:")
+        debug(f"  original eval:")
         for key, (loss, acc) in saved_metrics['eval'].items():
-            print(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
+            debug(f"    {key:<10}  loss={loss:.4f}  acc={acc:.2f}%")
     return checkpoint
