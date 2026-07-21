@@ -18,7 +18,7 @@ trains the same weights with a 1:32 mask. Next, it freezes the 1:32 mask,
 preventing the weights from changing, and trains a 1:16 mask. Repeats for 1:8
 and 1:4 masks, each time freezing the previous mask. Finally, it freezes the
 1:4 mask and fine-tunes the dense non-masked weights. The first and last layer,
-as well as the BN buffers are frozen for each training after the first dense
+as well as the BN parameters are frozen for each training after the first dense
 training. Each sparsity mode maintains its own copy of the BN stats buffer.
 
 Total epochs = 200 + 30 * 5 = 350
